@@ -1,0 +1,10 @@
+.git
+.local-tools
+node_modules
+dist
+generated
+.env*
+test-results
+playwright-report
+backups
+*.dump

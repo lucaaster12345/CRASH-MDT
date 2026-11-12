@@ -1,0 +1,55 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-app: &app
+  image: crash-mdt:local
+  build: .
+  init: true
+  environment:
+    NODE_ENV: development
+    APP_ORIGIN: "http://localhost:${LOCAL_PORT:-8080}"
+    DISPLAY_TIMEZONE: "${DISPLAY_TIMEZONE:-UTC}"
+    DATABASE_URL: "postgresql://crash:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/crash"
+  logging: *logging
+
+services:
+  db:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_USER: crash
+      POSTGRES_DB: crash
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"
+      TZ: UTC
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crash -d crash"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+    logging: *logging
+  migrate:
+    <<: *app
+    command: ["npm", "run", "migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+  app:
+    <<: *app
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports:
+      - "127.0.0.1:${LOCAL_PORT:-8080}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    stop_grace_period: 25s
+
+volumes:
+  database:

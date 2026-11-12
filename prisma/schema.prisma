@@ -1,0 +1,391 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  INVESTIGATOR
+  VIEWER
+}
+
+enum CredentialKind {
+  ACTIVATION
+  RESET
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum PersonRole {
+  SUSPECT
+  WITNESS
+  OFFICER
+}
+
+enum DocumentType {
+  INCIDENT
+  INTERROGATION
+  INTERVIEW
+  ARREST
+  SUPPLEMENTAL
+  SURVEILLANCE
+  NOTES
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+}
+
+enum EvidenceType {
+  IMAGE
+  LINK
+  NOTE
+}
+
+model User {
+  id              String        @id @default(uuid())
+  username        String        @unique
+  displayName     String
+  badge           String?
+  role            Role
+  password        String?
+  disabledAt      DateTime?
+  createdAt       DateTime      @default(now())
+  sessions        Session[]
+  credentials     Credential[]
+  assigned        CaseMember[]
+  leads           Case[]        @relation("Lead")
+  persons         CasePerson[]
+  documents       Document[]
+  revisions       Revision[]
+  evidence        Evidence[]
+  tasks           Task[]        @relation("Assignee")
+  taskCompletions Task[]        @relation("CompletedBy")
+  events          Audit[]
+  favorites       Favorite[]
+  searches        SavedSearch[]
+}
+
+model Session {
+  id        String   @id
+  csrf      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Credential {
+  digest    String         @id
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      CredentialKind
+  expiresAt DateTime
+
+  @@unique([userId, kind])
+}
+
+model CaseStatus {
+  id       String @id
+  label    String @unique
+  position Int
+  cases    Case[]
+}
+
+model Case {
+  id               String         @id @default(uuid())
+  sequence         Int            @unique @default(autoincrement())
+  number           String         @unique
+  title            String
+  summary          String         @default("")
+  priority         Priority       @default(NORMAL)
+  statusId         String         @default("draft")
+  status           CaseStatus     @relation(fields: [statusId], references: [id])
+  restricted       Boolean        @default(false)
+  version          Int            @default(1)
+  nextEvidence     Int            @default(1)
+  occurredAt       DateTime?
+  openedAt         DateTime       @default(now())
+  closedAt         DateTime?
+  archivedAt       DateTime?
+  preArchiveStatus String?
+  updatedAt        DateTime       @updatedAt
+  leadId           String?
+  lead             User?          @relation("Lead", fields: [leadId], references: [id])
+  members          CaseMember[]
+  tags             CaseTag[]
+  persons          CasePerson[]
+  documents        Document[]
+  evidence         Evidence[]
+  tasks            Task[]
+  links            RelatedCase[]  @relation("RelatedFrom")
+  linkedFrom       RelatedCase[]  @relation("RelatedTo")
+  externalLinks    ExternalLink[]
+  favorites        Favorite[]
+
+  @@index([statusId, updatedAt])
+  @@index([leadId])
+}
+
+model CaseMember {
+  caseId String
+  userId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@id([caseId, userId])
+  @@index([userId, caseId])
+}
+
+model Tag {
+  id       String       @id @default(uuid())
+  label    String       @unique
+  cases    CaseTag[]
+  profiles ProfileTag[]
+}
+
+model CaseTag {
+  caseId String
+  tagId  String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([caseId, tagId])
+  @@index([tagId])
+}
+
+model ProfileTag {
+  profileId String
+  tagId     String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([profileId, tagId])
+  @@index([tagId])
+}
+
+model Profile {
+  id              String       @id @default(uuid())
+  fullName        String
+  aliases         String[]     @default([])
+  identifier      String?
+  birthDate       DateTime?    @db.Date
+  contact         String       @default("")
+  portraitUrl     String?
+  confirmedNotes  String       @default("")
+  unverifiedNotes String       @default("")
+  archivedAt      DateTime?
+  version         Int          @default(1)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  tags            ProfileTag[]
+  appearances     CasePerson[]
+
+  @@index([identifier])
+  @@index([archivedAt, fullName])
+}
+
+model CasePerson {
+  id        String     @id @default(uuid())
+  caseId    String
+  case      Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  role      PersonRole
+  name      String
+  detail    String     @default("")
+  profileId String?
+  profile   Profile?   @relation(fields: [profileId], references: [id])
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id])
+  evidence  Evidence[]
+
+  @@index([caseId, role])
+  @@index([profileId])
+}
+
+model RelatedCase {
+  fromId      String
+  toId        String
+  explanation String
+  from        Case   @relation("RelatedFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to          Case   @relation("RelatedTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@id([fromId, toId])
+  @@index([toId])
+}
+
+model ExternalLink {
+  id          String @id @default(uuid())
+  caseId      String
+  case        Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title       String
+  description String
+  url         String
+
+  @@index([caseId])
+}
+
+model Document {
+  id            String       @id @default(uuid())
+  caseId        String
+  case          Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title         String
+  type          DocumentType
+  category      String       @default("")
+  authorId      String
+  author        User         @relation(fields: [authorId], references: [id])
+  state         Bytes
+  stateHash     String
+  plainText     String       @default("")
+  narrativeText String       @default("")
+  epoch         Int          @default(1)
+  version       Int          @default(1)
+  submittedId   String?      @unique
+  submitted     Revision?    @relation("Submitted", fields: [submittedId], references: [id])
+  revisions     Revision[]   @relation("History")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  removedAt     DateTime?
+  evidence      Evidence[]
+  tasks         Task[]
+
+  @@index([caseId, removedAt])
+}
+
+model Revision {
+  id            String    @id @default(uuid())
+  documentId    String
+  document      Document  @relation("History", fields: [documentId], references: [id], onDelete: Cascade)
+  label         String
+  kind          String
+  state         Bytes
+  stateHash     String
+  plainText     String
+  narrativeText String
+  actorId       String?
+  actor         User?     @relation(fields: [actorId], references: [id])
+  createdAt     DateTime  @default(now())
+  submittedFor  Document? @relation("Submitted")
+
+  @@index([documentId, createdAt])
+}
+
+model Template {
+  type     DocumentType @id
+  headings String[]
+}
+
+model Evidence {
+  id            String        @id @default(uuid())
+  caseId        String
+  case          Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  reference     Int
+  title         String
+  type          EvidenceType
+  description   String        @default("")
+  sourceUrl     String?
+  collectedAt   DateTime?
+  personId      String?
+  person        CasePerson?   @relation(fields: [personId], references: [id], onDelete: SetNull)
+  documentId    String?
+  document      Document?     @relation(fields: [documentId], references: [id])
+  submittedById String
+  submittedBy   User          @relation(fields: [submittedById], references: [id])
+  version       Int           @default(1)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  removedAt     DateTime?
+  notes         CustodyNote[]
+  tasks         Task[]
+
+  @@unique([caseId, reference])
+}
+
+model CustodyNote {
+  id         String   @id @default(uuid())
+  evidenceId String
+  evidence   Evidence @relation(fields: [evidenceId], references: [id])
+  text       String
+  actorId    String
+  createdAt  DateTime @default(now())
+
+  @@index([evidenceId, createdAt])
+}
+
+model Task {
+  id            String     @id @default(uuid())
+  caseId        String
+  case          Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  description   String
+  assigneeId    String?
+  assignee      User?      @relation("Assignee", fields: [assigneeId], references: [id])
+  dueAt         DateTime?
+  priority      Priority   @default(NORMAL)
+  status        TaskStatus @default(TODO)
+  completedAt   DateTime?
+  completedById String?
+  completedBy   User?      @relation("CompletedBy", fields: [completedById], references: [id])
+  documentId    String?
+  document      Document?  @relation(fields: [documentId], references: [id])
+  evidenceId    String?
+  evidence      Evidence?  @relation(fields: [evidenceId], references: [id])
+  version       Int        @default(1)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([caseId, status])
+  @@index([assigneeId, status, dueAt])
+}
+
+model Favorite {
+  userId String
+  caseId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@id([userId, caseId])
+}
+
+model SavedSearch {
+  id      String @id @default(uuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label   String
+  filters Json
+
+  @@unique([userId, label])
+}
+
+model Audit {
+  id        String   @id @default(uuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String
+  target    String
+  targetId  String
+  caseId    String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([caseId, createdAt])
+  @@index([target, targetId, createdAt])
+  @@index([createdAt])
+}
+
+model Setting {
+  key   String @id
+  value Json
+}

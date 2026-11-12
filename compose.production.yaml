@@ -1,0 +1,82 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-app: &app
+  image: crash-mdt:0.1.0
+  build: .
+  init: true
+  security_opt: ["no-new-privileges:true"]
+  environment:
+    NODE_ENV: production
+    APP_ORIGIN: "https://${DOMAIN:?Set DOMAIN in .env}"
+    DISPLAY_TIMEZONE: "${DISPLAY_TIMEZONE:-UTC}"
+    DATABASE_URL: "postgresql://crash:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/crash"
+    TRUST_PROXY: "1"
+  logging: *logging
+
+services:
+  db:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_USER: crash
+      POSTGRES_DB: crash
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"
+      TZ: UTC
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crash -d crash"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+    logging: *logging
+  migrate:
+    <<: *app
+    networks: [database]
+    command: ["npm", "run", "migrate"]
+    depends_on:
+      db: {condition: service_healthy}
+  app:
+    <<: *app
+    networks: [database, edge]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    stop_grace_period: 25s
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL in .env}"
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [edge]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app: {condition: service_healthy}
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  edge:
+  database:
+    internal: true
+
+volumes:
+  database:
+  caddy_data:
+  caddy_config:

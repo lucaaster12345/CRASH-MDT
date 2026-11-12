@@ -1,0 +1,686 @@
+import assert from 'node:assert/strict'
+import { before, after, test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { mkdtemp, rm } from 'node:fs/promises'
+import type { ChildProcess } from 'node:child_process'
+import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider'
+import { WebSocket } from 'ws'
+import * as Y from 'yjs'
+import { yDocToProsemirrorJSON } from '@tiptap/y-tiptap'
+import {
+  account,
+  Client,
+  exec,
+  issuedPassword,
+  kill,
+  masterPassword,
+  provision,
+  start,
+  testDatabase,
+  until,
+} from './fixtures.js'
+import type { Actor } from '../apps/server/db.js'
+import type { CaseRecord, DocumentRecord, Durable, Page, ProfileRecord } from '../apps/web/src/types.js'
+import { durabilityProof } from '../packages/shared/durability.js'
+
+const origin = 'http://127.0.0.1:38507'
+process.env.DATABASE_URL = testDatabase()
+const { db } = await import('../apps/server/db.js')
+const admin = new Client(origin)
+const anonymous = new Client(origin)
+let server: ChildProcess
+let writer: Awaited<ReturnType<typeof provision>>
+let partner: Awaited<ReturnType<typeof provision>>
+let viewer: Awaited<ReturnType<typeof provision>>
+let publicCase: CaseRecord
+let privateCase: CaseRecord
+let documentId: string
+const editorCleanups = new Set<() => void>()
+
+before(async () => {
+  await db.$executeRaw`TRUNCATE "User", "Profile", "Case", "Tag", "Audit", "Setting" RESTART IDENTITY CASCADE`
+  await account(origin, 'bootstrap', masterPassword)
+  server = await start(origin)
+})
+after(async () => {
+  for (const cleanup of editorCleanups) cleanup()
+  if (server) await kill(server)
+  await db.$disconnect()
+})
+
+async function openCase(client: Client, title: string, extra: object = {}) {
+  const { id } = await client.call<{ id: string }>('/cases', 'POST', { title, ...extra }, 201)
+  return client.call<CaseRecord>('/cases/' + id)
+}
+const documentPath = () => '/documents/' + documentId
+
+function connect(client: Client, id: string, epoch: number, doc = new Y.Doc(), requestOrigin = origin) {
+  const room = id + '.' + epoch
+  class AuthWebSocket extends WebSocket {
+    constructor(url: string) {
+      super(url, { headers: { Cookie: client.cookie, Origin: requestOrigin } })
+      if (process.env.TEST_DEBUG) {
+        this.on('open', () => console.log('Test WebSocket opened'))
+        this.on('message', (data) =>
+          console.log(
+            'Test WebSocket frame received',
+            Array.isArray(data) ? data.length : data.byteLength,
+          ),
+        )
+        this.on('close', (code, reason) =>
+          console.log('Test WebSocket closed', code, reason.toString()),
+        )
+        this.on('error', (error) => console.log('Test WebSocket error', error.message))
+      }
+    }
+  }
+  const socket = new HocuspocusProviderWebsocket({
+    url: origin.replace('http', 'ws') + '/collaboration?room=' + room,
+    WebSocketPolyfill: AuthWebSocket,
+    minDelay: 100,
+    delay: 100,
+    maxDelay: 500,
+  })
+  let synced = false
+  let closed = false
+  const provider = new HocuspocusProvider({
+    name: room,
+    websocketProvider: socket,
+    document: doc,
+    onSynced: ({ state }) => {
+      synced = state
+    },
+    onClose: () => {
+      closed = true
+    },
+    onAuthenticationFailed: ({ reason }) => {
+      if (process.env.TEST_DEBUG) console.log('Document authentication rejected', reason)
+    },
+  })
+  provider.attach()
+  const stop = () => {
+    provider.destroy()
+    socket.destroy()
+    editorCleanups.delete(stop)
+  }
+  editorCleanups.add(stop)
+  return { doc, provider, stop, synced: () => synced, closed: () => closed }
+}
+
+function addParagraph(doc: Y.Doc, content: string) {
+  doc.transact(() => {
+    const element = new Y.XmlElement('paragraph')
+    const text = new Y.XmlText()
+    text.insert(0, content)
+    element.insert(0, [text])
+    doc.getXmlFragment('default').push([element])
+  })
+}
+const docText = (doc: Y.Doc) => JSON.stringify(yDocToProsemirrorJSON(doc, 'default'))
+const stateHash = (doc: Y.Doc) => createHash('sha256').update(durabilityProof(doc)).digest('hex')
+
+test('bootstrap is idempotent, accounts are issued, CSRF and single-use credentials are enforced', async () => {
+  assert.match(await account(origin, 'bootstrap', 'Fixture alternative password'), /already exists/)
+  await anonymous.call('/cases/' + randomBytes(16).toString('hex'), 'GET', undefined, 401)
+  await anonymous.call('/auth/register', 'POST', {}, 401)
+  await anonymous.call(
+    '/auth/login',
+    'POST',
+    { username: 'mercia', password: masterPassword },
+    403,
+    true,
+  )
+  await anonymous.call(
+    '/auth/login',
+    'POST',
+    { username: 'mercia', password: 'Fixture alternative password' },
+    401,
+  )
+  const master = await admin.call<{ user: Actor }>('/auth/login', 'POST', {
+    username: 'mercia',
+    password: masterPassword,
+  })
+  assert.equal(master.user.role, 'ADMIN')
+  const forged = new Client(origin)
+  forged.cookie = admin.cookie
+  await forged.call('/cases', 'POST', { title: 'Blocked by CSRF' }, 403)
+  await admin.call('/accounts/' + master.user.id + '/action', 'POST', { action: 'disable' }, 403)
+  writer = await provision(admin, 'INVESTIGATOR', 'Fictional Investigator')
+  partner = await provision(admin, 'INVESTIGATOR', 'Fictional Partner')
+  viewer = await provision(admin, 'VIEWER', 'Fictional Viewer')
+  await anonymous.call('/auth/activate', 'POST', { code: writer.code, password: issuedPassword }, 400)
+  const delegated = await provision(admin, 'ADMIN', 'Fictional Administrator')
+  await delegated.client.call(
+    '/accounts/' + writer.user.id + '/action',
+    'POST',
+    { action: 'role', role: 'ADMIN' },
+    403,
+  )
+  await delegated.client.call(
+    '/accounts/' + master.user.id + '/action',
+    'POST',
+    { action: 'role', role: 'VIEWER' },
+    403,
+  )
+  const reset = await admin.call<{ code: string }>('/accounts/' + viewer.user.id + '/action', 'POST', {
+    action: 'issue',
+  })
+  await db.credential.updateMany({
+    where: { userId: viewer.user.id },
+    data: { expiresAt: new Date(0) },
+  })
+  await anonymous.call('/auth/activate', 'POST', { code: reset.code, password: issuedPassword }, 400)
+  const replacement = await admin.call<{ code: string }>(
+    '/accounts/' + viewer.user.id + '/action',
+    'POST',
+    { action: 'issue' },
+  )
+  const oldSession = viewer.client.cookie
+  await viewer.client.call('/auth/activate', 'POST', {
+    code: replacement.code,
+    password: issuedPassword,
+  })
+  const revoked = new Client(origin)
+  revoked.cookie = oldSession
+  await revoked.call('/auth/session', 'GET', undefined, 401)
+  await anonymous.call(
+    '/auth/activate',
+    'POST',
+    { code: replacement.code, password: issuedPassword },
+    400,
+  )
+})
+
+test('case permissions cover search, profile appearances, related links, exports and dashboards', async () => {
+  publicCase = await openCase(writer.client, 'Fictional Rail Yard Inquiry', { leadId: writer.user.id })
+  privateCase = await openCase(writer.client, 'Privileged Saffron file', {
+    leadId: writer.user.id,
+    memberIds: [partner.user.id],
+    restricted: true,
+    summary: 'Protected Orchid incident',
+  })
+  documentId = privateCase.documents.find((doc) => doc.type === 'INCIDENT')!.id
+  await viewer.client.call('/cases', 'POST', { title: 'Disallowed' }, 403)
+  await viewer.client.call('/cases/' + privateCase.id, 'GET', undefined, 404)
+  await viewer.client.call(documentPath(), 'GET', undefined, 404)
+  await viewer.client.call(
+    '/cases/' + privateCase.id + '/export',
+    'POST',
+    { documents: [], evidence: true, tasks: true },
+    404,
+  )
+  const forbiddenRoom = connect(viewer.client, documentId, privateCase.documents[0]!.epoch)
+  await until(forbiddenRoom.closed, 'Unassigned viewer WebSocket rejected')
+  assert.equal(forbiddenRoom.synced(), false)
+  forbiddenRoom.stop()
+  const profile = await writer.client.call<{ id: string }>(
+    '/profiles',
+    'POST',
+    {
+      fullName: 'Fictional Alex Reed',
+      aliases: ['Mistral'],
+      identifier: 'ID-RD-29',
+    },
+    201,
+  )
+  await writer.client.call(
+    '/cases/' + privateCase.id + '/persons',
+    'POST',
+    {
+      role: 'SUSPECT',
+      name: 'Alex R.',
+      profileId: profile.id,
+      version: privateCase.version,
+    },
+    201,
+  )
+  await writer.client.call(
+    '/cases/' + publicCase.id + '/related',
+    'POST',
+    {
+      toId: privateCase.id,
+      explanation: 'Overlapping inquiries',
+      version: publicCase.version,
+    },
+    204,
+  )
+  const visible = await viewer.client.call<CaseRecord>('/cases/' + publicCase.id)
+  assert.deepEqual(visible.links, [])
+  const safeProfile = await viewer.client.call<ProfileRecord>('/profiles/' + profile.id)
+  assert.deepEqual(safeProfile.appearances, [])
+  for (const term of ['Saffron', 'Mistral', 'Orchid', privateCase.number]) {
+    const results = await viewer.client.call<Page<CaseRecord>>(
+      '/search/cases?q=' + encodeURIComponent(term),
+    )
+    assert.deepEqual(results, { items: [], more: false })
+  }
+  const dashboard = await viewer.client.call('/search/dashboard')
+  assert.ok(!JSON.stringify(dashboard).includes(privateCase.title))
+  const packet = await viewer.client.call('/cases/' + publicCase.id + '/export', 'POST', {
+    documents: [],
+    evidence: true,
+    tasks: true,
+  })
+  assert.ok(!JSON.stringify(packet).includes(privateCase.title))
+  privateCase = await admin.call<CaseRecord>('/cases/' + privateCase.id)
+  publicCase = await admin.call<CaseRecord>('/cases/' + publicCase.id)
+})
+
+test('two authorized editors persist and reconnect, direct viewer writes are ignored, saved content survives a kill', async () => {
+  const initial = await writer.client.call<DocumentRecord>(documentPath())
+  const base = '/cases/' + privateCase.id
+  await writer.client.call(
+    base + '/status',
+    'POST',
+    { version: privateCase.version, action: 'move', status: 'active' },
+    409,
+  )
+  await writer.client.call(
+    documentPath() + '/history',
+    'POST',
+    { action: 'submit', epoch: initial.epoch, stateHash: initial.stateHash },
+    422,
+  )
+  const a = connect(writer.client, documentId, initial.epoch)
+  const b = connect(partner.client, documentId, initial.epoch)
+  await until(() => a.synced() && b.synced(), 'Initial editor synchronization')
+  a.provider.setAwarenessField('user', { name: 'Impersonated identity', color: 'red' })
+  await until(
+    () =>
+      [...b.provider.awareness!.getStates().values()].some(
+        (state) => state.user?.name === 'Fictional Investigator',
+      ),
+    'Trusted awareness',
+  )
+  addParagraph(a.doc, 'Saffron witnesses observed a blue van leaving the rail depot.')
+  addParagraph(b.doc, 'An officer logged the vehicle description in the evening.')
+  await until(
+    () => docText(a.doc).includes('vehicle description') && docText(b.doc).includes('blue van'),
+    'Concurrent paragraphs',
+  )
+  b.stop()
+  addParagraph(b.doc, 'A disconnected partner recorded the checkpoint sequence.')
+  const returning = connect(partner.client, documentId, initial.epoch, b.doc)
+  await until(
+    () => returning.synced() && docText(a.doc).includes('checkpoint sequence'),
+    'Reconnect merge',
+  )
+  assert.equal(docText(a.doc).match(/checkpoint sequence/g)?.length, 1)
+  await until(
+    async () =>
+      (await writer.client.call<Durable>(documentPath() + '/durable')).stateHash === stateHash(a.doc),
+    'Durable hash',
+  )
+  const hash = stateHash(a.doc)
+
+  const publicDoc = publicCase.documents[0]!
+  const readonly = connect(viewer.client, publicDoc.id, publicDoc.epoch)
+  await until(readonly.synced, 'Viewer synchronizes')
+  assert.equal(readonly.provider.authorizedScope, 'readonly')
+  addParagraph(readonly.doc, 'Viewer tried to write directly.')
+  await delay(900)
+  const unchanged = await admin.call<Durable>('/documents/' + publicDoc.id + '/durable')
+  assert.equal(unchanged.stateHash, publicDoc.stateHash)
+  await viewer.client.call(
+    '/documents/' + publicDoc.id + '/history',
+    'POST',
+    { action: 'checkpoint', label: 'Blocked', epoch: publicDoc.epoch, stateHash: publicDoc.stateHash },
+    403,
+  )
+  const wrongOrigin = connect(
+    writer.client,
+    documentId,
+    initial.epoch,
+    new Y.Doc(),
+    'http://127.0.0.1:38508',
+  )
+  await delay(350)
+  assert.equal(wrongOrigin.synced(), false)
+  wrongOrigin.stop()
+
+  a.stop()
+  returning.stop()
+  readonly.stop()
+  await kill(server)
+  server = await start(origin)
+  const durable = await writer.client.call<Durable>(documentPath() + '/durable')
+  assert.equal(durable.stateHash, hash)
+  const reloaded = connect(writer.client, documentId, initial.epoch)
+  await until(reloaded.synced, 'Reloaded saved state')
+  assert.match(docText(reloaded.doc), /blue van/)
+  assert.match(docText(reloaded.doc), /vehicle description/)
+  assert.equal(docText(reloaded.doc).match(/checkpoint sequence/g)?.length, 1)
+  reloaded.stop()
+  const malformed = connect(writer.client, documentId, initial.epoch)
+  await until(malformed.synced, 'Validation test editor sync')
+  const image = new Y.XmlElement('image')
+  image.setAttribute('src', 'javascript:alert(1)')
+  malformed.doc.getXmlFragment('default').push([image])
+  await until(malformed.closed, 'Unsafe collaborative image rejected')
+  assert.equal((await writer.client.call<Durable>(documentPath() + '/durable')).stateHash, hash)
+  malformed.stop()
+  const matched = await writer.client.call<Page<CaseRecord>>('/search/cases?q=checkpoint%20sequence')
+  assert.equal(matched.items[0]?.id, privateCase.id)
+  await writer.client.call(
+    documentPath() + '/history',
+    'POST',
+    { action: 'submit', epoch: initial.epoch, stateHash: hash },
+    204,
+  )
+  await writer.client.call(
+    base + '/status',
+    'POST',
+    { version: privateCase.version, action: 'move', status: 'active' },
+    204,
+  )
+  privateCase = await writer.client.call<CaseRecord>(base)
+})
+
+test('version conflicts, lifecycle changes, and revision restore preserve durable history', async () => {
+  const route = '/cases/' + privateCase.id
+  const old = privateCase.version
+  const update = {
+    title: privateCase.title,
+    summary: 'Revised summary',
+    restricted: true,
+    leadId: writer.user.id,
+    memberIds: [partner.user.id],
+    version: old,
+  }
+  await writer.client.call(route, 'PATCH', update, 204)
+  await writer.client.call(route, 'PATCH', { ...update, title: 'Stale title' }, 409)
+  const original = await writer.client.call<DocumentRecord>(documentPath())
+  const checkpoint = {
+    action: 'checkpoint',
+    label: 'Before review',
+    epoch: original.epoch,
+    stateHash: original.stateHash,
+  }
+  await writer.client.call(documentPath() + '/history', 'POST', checkpoint, 204)
+  const revisions = await writer.client.call<Page<{ id: string; label: string }>>(
+    documentPath() + '/history',
+  )
+  const saved = revisions.items.find((item) => item.label === 'Before review')!
+  const open = connect(partner.client, documentId, original.epoch)
+  await until(open.synced, 'Editor opened for revision test')
+  addParagraph(open.doc, 'An amendment requires a new review.')
+  await until(
+    async () =>
+      (await writer.client.call<Durable>(documentPath() + '/durable')).stateHash ===
+      stateHash(open.doc),
+    'Amendment durable',
+  )
+  const amended = await writer.client.call<DocumentRecord>(documentPath())
+  assert.notEqual(amended.stateHash, amended.submitted?.stateHash)
+  await writer.client.call(
+    documentPath() + '/history',
+    'POST',
+    { action: 'restore', revisionId: saved.id, epoch: amended.epoch, stateHash: amended.stateHash },
+    204,
+  )
+  await until(open.closed, 'Restore disconnects old room')
+  open.stop()
+  const restored = await writer.client.call<DocumentRecord>(documentPath())
+  assert.equal(restored.stateHash, original.stateHash)
+  assert.equal(restored.epoch, original.epoch + 1)
+  const history = await writer.client.call<Page<{ id: string; label: string }>>(
+    documentPath() + '/history',
+  )
+  assert.ok(history.items.some((item) => item.label === 'Before restore'))
+  const rejoined = connect(partner.client, documentId, restored.epoch)
+  await until(rejoined.synced, 'Rejoin restored room')
+  assert.doesNotMatch(docText(rejoined.doc), /amendment requires/)
+  const latest = await writer.client.call<CaseRecord>(route)
+  await writer.client.call(route, 'PATCH', { ...update, version: latest.version, memberIds: [] }, 204)
+  await until(rejoined.closed, 'Removing access disconnects open editor')
+  rejoined.stop()
+  await partner.client.call(route, 'GET', undefined, 404)
+  privateCase = await writer.client.call<CaseRecord>(route)
+  const current = await writer.client.call<DocumentRecord>(documentPath())
+  const editing = connect(writer.client, documentId, current.epoch)
+  await until(editing.synced, 'Editor before disable')
+  await admin.call('/accounts/' + writer.user.id + '/action', 'POST', { action: 'disable' })
+  await until(editing.closed, 'Disabling account disconnects open editor')
+  editing.stop()
+  await writer.client.call(route, 'GET', undefined, 401)
+  await admin.call('/accounts/' + writer.user.id + '/action', 'POST', { action: 'enable' })
+  await writer.client.call('/auth/login', 'POST', {
+    username: writer.user.username,
+    password: issuedPassword,
+  })
+  await writer.client.call(
+    route + '/status',
+    'POST',
+    { version: privateCase.version, action: 'move', status: 'closed' },
+    204,
+  )
+  let record = await writer.client.call<CaseRecord>(route)
+  assert.equal(record.writable, false)
+  await writer.client.call(route, 'PATCH', { ...update, version: record.version }, 409)
+  await writer.client.call(
+    route + '/status',
+    'POST',
+    { version: record.version, action: 'reopen' },
+    204,
+  )
+  record = await writer.client.call<CaseRecord>(route)
+  await writer.client.call(
+    route + '/status',
+    'POST',
+    { version: record.version, action: 'archive' },
+    204,
+  )
+  record = await writer.client.call<CaseRecord>(route)
+  assert.equal(record.statusId, 'archived')
+  assert.deepEqual((await writer.client.call<Page<CaseRecord>>('/search/cases?q=Saffron')).items, [])
+  assert.equal(
+    (await writer.client.call<Page<CaseRecord>>('/search/cases?q=Saffron&archived=only')).items[0]?.id,
+    privateCase.id,
+  )
+  await writer.client.call(
+    route + '/status',
+    'POST',
+    { version: record.version, action: 'restore' },
+    204,
+  )
+})
+
+test('items, unsafe URL rejection, search by person and tag, and history retention', async () => {
+  const route = '/cases/' + publicCase.id
+  await admin.call('/admin/tags', 'POST', { label: 'Copper review' }, 204)
+  const { tags } = await admin.call<{ tags: { id: string; label: string }[] }>('/catalog')
+  const tag = tags.find((item) => item.label === 'Copper review')!
+  await writer.client.call(
+    route,
+    'PATCH',
+    { title: publicCase.title, leadId: writer.user.id, tagIds: [tag.id], version: publicCase.version },
+    204,
+  )
+  let record = await writer.client.call<CaseRecord>(route)
+  const person = await writer.client.call<{ id: string }>(
+    route + '/persons',
+    'POST',
+    { name: 'Officer Alder', role: 'OFFICER', version: record.version },
+    201,
+  )
+  record = await writer.client.call<CaseRecord>(route)
+  const witness = await writer.client.call<{ id: string }>(
+    route + '/persons',
+    'POST',
+    { name: 'Sparrow H.', role: 'WITNESS', version: record.version },
+    201,
+  )
+  record = await writer.client.call<CaseRecord>(route)
+  const profile = await writer.client.call<{ id: string }>(
+    route + '/persons/' + witness.id + '/profile',
+    'POST',
+    { version: record.version },
+    201,
+  )
+  const document = await writer.client.call<DocumentRecord>(
+    '/documents/case/' + record.id,
+    'POST',
+    { title: 'Field notebook', type: 'NOTES' },
+    201,
+  )
+  await writer.client.call(
+    route + '/evidence',
+    'POST',
+    { type: 'IMAGE', title: 'Unsafe source', sourceUrl: 'javascript:alert(1)' },
+    422,
+  )
+  await writer.client.call(
+    route + '/evidence',
+    'POST',
+    { type: 'IMAGE', title: 'Unapproved source', sourceUrl: 'https://example.org/image.jpg' },
+    422,
+  )
+  const evidence = await writer.client.call<{ id: string; version: number; reference: number }>(
+    route + '/evidence',
+    'POST',
+    {
+      type: 'IMAGE',
+      title: 'Fictional depot reference',
+      sourceUrl: 'https://i.imgur.com/example.jpg?key=preserved',
+      documentId: document.id,
+      personId: person.id,
+    },
+    201,
+  )
+  await writer.client.call(
+    route + '/evidence/' + evidence.id,
+    'PATCH',
+    {
+      type: 'IMAGE',
+      title: 'Replacement depot reference',
+      sourceUrl: 'https://i.imgur.com/replacement.jpg',
+      version: evidence.version,
+    },
+    204,
+  )
+  const evidenceHistory = await writer.client.call(route + '/evidence/' + evidence.id + '/history')
+  assert.match(JSON.stringify(evidenceHistory), /key=preserved/)
+  const task = await writer.client.call<{ id: string; version: number }>(
+    route + '/tasks',
+    'POST',
+    {
+      description: 'Verify arrival time',
+      assigneeId: writer.user.id,
+      documentId: document.id,
+      evidenceId: evidence.id,
+    },
+    201,
+  )
+  await writer.client.call(
+    route + '/tasks/' + task.id,
+    'PATCH',
+    {
+      description: 'Verify arrival time',
+      assigneeId: writer.user.id,
+      status: 'DONE',
+      version: task.version,
+    },
+    204,
+  )
+  record = await writer.client.call<CaseRecord>(route)
+  assert.equal(record.tasks[0]?.completedBy?.id, writer.user.id)
+  assert.equal(record.evidence[0]?.reference, evidence.reference)
+  for (const q of ['Copper review', 'Officer Alder', 'Sparrow H.', 'Field notebook']) {
+    const results = await writer.client.call<Page<CaseRecord>>(
+      '/search/cases?q=' + encodeURIComponent(q),
+    )
+    assert.ok(
+      results.items.some((item) => item.id === publicCase.id),
+      q,
+    )
+  }
+  await admin.call('/admin/tags/' + tag.id, 'DELETE', {}, 204)
+  assert.equal((await writer.client.call<CaseRecord>(route)).tags.length, 0)
+  await writer.client.call(
+    '/profiles/' + profile.id + '/archive',
+    'POST',
+    { archived: true, version: 1 },
+    204,
+  )
+  assert.equal(
+    (await writer.client.call<CaseRecord>(route)).persons.find((item) => item.id === witness.id)
+      ?.profile?.id,
+    profile.id,
+  )
+  await writer.client.call('/documents/' + record.documents[0]!.id, 'DELETE', { version: 1 }, 409)
+})
+
+test(
+  'native PostgreSQL dump restores case metadata and canonical Yjs bytes into a fresh database',
+  {
+    skip:
+      !process.env.TEST_PG_BIN && 'Set TEST_PG_BIN to a directory containing pg_dump and pg_restore.',
+  },
+  async () => {
+    const name = 'crash_mdt_test_restore' + randomBytes(4).toString('hex')
+    const path = await mkdtemp(join(tmpdir(), 'crash-restore-'))
+    const source = testDatabase()
+    const destination = new URL(source)
+    destination.pathname = '/' + name
+    const bin = process.env.TEST_PG_BIN!
+    const exe = (name: string) => join(bin, name + (process.platform === 'win32' ? '.exe' : ''))
+    const pgEnv = { ...process.env, PGPASSWORD: decodeURIComponent(new URL(source).password) }
+    const connectionArg = (url: URL) => {
+      const safe = new URL(url)
+      safe.password = ''
+      return safe.toString()
+    }
+    const { PrismaClient } = await import('../generated/prisma/client.js')
+    const { PrismaPg } = await import('@prisma/adapter-pg')
+    const restored = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: destination.toString() }),
+    })
+    try {
+      await db.$executeRawUnsafe('CREATE DATABASE "' + name + '"')
+      const archive = join(path, 'backup.dump')
+      await exec(
+        exe('pg_dump'),
+        [
+          '--format=custom',
+          '--no-owner',
+          '--no-privileges',
+          '--file',
+          archive,
+          connectionArg(new URL(source)),
+        ],
+        { env: pgEnv },
+      )
+      await exec(
+        exe('pg_restore'),
+        [
+          '--single-transaction',
+          '--exit-on-error',
+          '--no-owner',
+          '--no-privileges',
+          '--dbname',
+          connectionArg(destination),
+          archive,
+        ],
+        { env: pgEnv },
+      )
+      const before = await db.document.findUniqueOrThrow({ where: { id: documentId } })
+      const after = await restored.document.findUniqueOrThrow({
+        where: { id: documentId },
+        include: { case: true },
+      })
+      assert.equal(after.case.number, privateCase.number)
+      assert.deepEqual(after.state, before.state)
+      const doc = new Y.Doc()
+      Y.applyUpdate(doc, after.state)
+      assert.match(docText(doc), /blue van/)
+      doc.destroy()
+    } finally {
+      await restored.$disconnect()
+      await db.$executeRawUnsafe('DROP DATABASE IF EXISTS "' + name + '" WITH (FORCE)')
+      await rm(path, { recursive: true, force: true })
+    }
+  },
+)
