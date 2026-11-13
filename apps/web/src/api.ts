@@ -1,3 +1,5 @@
+import { localDateTimeToIso, localDateTimeValue } from './local-time.js'
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -62,9 +64,9 @@ export const lines = (form: FormData, name: string) =>
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter(Boolean)
-export const instant = (form: FormData, name: string) => {
+export const instant = (form: FormData, name: string, original?: string | null) => {
   const value = nullable(form, name)
-  return value ? value + ':00Z' : null
+  return value ? localDateTimeToIso(value, original) : null
 }
 export const dateValue = (value?: string | null) => value?.slice(0, 10) ?? ''
-export const timeValue = (value?: string | null) => value?.slice(0, 16) ?? ''
+export const timeValue = localDateTimeValue

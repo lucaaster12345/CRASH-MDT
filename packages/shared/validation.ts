@@ -3,6 +3,10 @@ import { z } from 'zod'
 export const roles = ['ADMIN', 'INVESTIGATOR', 'VIEWER'] as const
 export const priorities = ['LOW', 'NORMAL', 'HIGH', 'URGENT'] as const
 export const personRoles = ['SUSPECT', 'WITNESS', 'OFFICER'] as const
+export const legalDocumentTypes = ['SUBPOENA', 'WARRANT_REQUEST', 'AFFIDAVIT', 'LEGAL_REQUEST'] as const
+export function isLegalDocument(type: string) {
+  return legalDocumentTypes.some((value) => value === type)
+}
 export const documentTypes = [
   'INCIDENT',
   'INTERROGATION',
@@ -10,6 +14,7 @@ export const documentTypes = [
   'ARREST',
   'SUPPLEMENTAL',
   'SURVEILLANCE',
+  ...legalDocumentTypes,
   'NOTES',
 ] as const
 export const taskStatuses = ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'] as const
@@ -52,6 +57,19 @@ export const searchFilters = z.object({
   investigator: id.optional(),
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),
+  timeZone: z
+    .string()
+    .max(100)
+    .regex(/^[A-Za-z][A-Za-z0-9_+/-]*$/)
+    .refine((zone) => {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: zone })
+        return true
+      } catch {
+        return false
+      }
+    }, 'Use a valid timezone.')
+    .optional(),
   archived: z.enum(['include', 'only']).optional(),
   page: z.coerce.number().int().min(1).max(10000).default(1),
 })
@@ -73,6 +91,10 @@ export const labels = {
   ARREST: 'Arrest report',
   SUPPLEMENTAL: 'Supplemental incident report',
   SURVEILLANCE: 'Observation notes',
+  SUBPOENA: 'Subpoena draft',
+  WARRANT_REQUEST: 'Warrant request draft',
+  AFFIDAVIT: 'Affidavit draft',
+  LEGAL_REQUEST: 'Legal request draft',
   NOTES: 'Investigative notes',
   TODO: 'To do',
   IN_PROGRESS: 'In progress',

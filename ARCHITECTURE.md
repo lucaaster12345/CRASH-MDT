@@ -26,9 +26,15 @@ A checkpoint or submission references durable state. A submission stores its own
 
 ## Search, URLs and exports
 
-PostgreSQL GIN full-text indexes cover case text and persisted document text. Trigram indexes assist selected name and title searches. Index content changes in the persistence transaction. Case and profile identifier matches appear before broader results. Dates are stored as UTC instants and displayed using `DISPLAY_TIMEZONE`. Date-range filters and timestamp entry use explicitly labeled UTC.
+PostgreSQL GIN full-text indexes cover case text and persisted document text. Trigram indexes assist selected name and title searches. Index content changes in the persistence transaction. Case and profile identifier matches appear before broader results. Dates are stored as UTC instants. The browser timezone controls display, timestamp entry and date-range filters. Date-only fields keep their calendar date.
 
 The browser loads approved remote image hosts directly under a restrictive CSP. Source URLs retain query strings and evidence history. No backend requests are made to source hosts. Exports use persisted plain text and evidence references. They omit inaccessible related cases and never include session tokens or canonical binary state.
+
+## Charge calculations and record deletion
+
+Administrators maintain the penal-code catalog. Case editors assign catalog entries and counts to individual suspects. The assignment stores the code, title, minutes and fine in USD cents from the catalog at assignment time. Totals add time and fines across counts. Catalog edits apply to new assignments. Each submitted incident revision stores its own charge totals, and charge changes require review before closing the case. Legal paperwork uses editable drafts in the same collaborative document system.
+
+Administrator case deletion cascades to its owned records and closes open document connections. Profile deletion detaches the profile from case appearances and preserves names recorded in those cases. Account deletion removes credentials and assignments. Historical author, evidence submitter, task completer and audit actor names survive through stored attribution. Audit history remains available to administrators.
 
 ## Common changes
 

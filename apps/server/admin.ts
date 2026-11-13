@@ -224,6 +224,7 @@ administration.get('/audit', async (req, res) => {
             { target: contains },
             { targetId: contains },
             { actor: { username: contains } },
+            { actorName: contains },
             { caseId: { in: caseIds.map((item) => item.id) } },
           ],
         }

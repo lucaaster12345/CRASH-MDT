@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { api, ApiError, errorMessage } from './api.js'
 import type { Catalog, Session } from './types.js'
+import { browserTimeZone } from './local-time.js'
 
 export const SessionContext = createContext<Session | null>(null)
 export const LiveContext = createContext({ revision: 0, connected: true, refresh: () => {} })
@@ -17,7 +18,7 @@ export function useCatalog() {
   return useResource<Catalog>('/catalog')
 }
 export function useDate() {
-  const { timezone } = useSession()
+  const timezone = browserTimeZone()
   return (value?: string | null) =>
     value
       ? new Intl.DateTimeFormat('en-GB', {

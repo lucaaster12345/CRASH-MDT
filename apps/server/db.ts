@@ -25,7 +25,19 @@ export async function audit(
   details?: Prisma.InputJsonValue,
   caseId?: string,
 ) {
-  await tx.audit.create({ data: { actorId, action, target, targetId, details, caseId } })
+  const actor =
+    actorId && (await tx.user.findUnique({ where: { id: actorId }, select: { displayName: true } }))
+  await tx.audit.create({
+    data: {
+      actorId,
+      actorName: actor ? actor.displayName : null,
+      action,
+      target,
+      targetId,
+      details,
+      caseId,
+    },
+  })
 }
 
 export function auditValues(value: unknown): Prisma.InputJsonValue {

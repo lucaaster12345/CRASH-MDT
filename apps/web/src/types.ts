@@ -1,7 +1,15 @@
 import type { z } from 'zod'
 import type { getCase, caseCard, documentMeta, taskFields } from '../../server/cases.js'
 import type { Actor } from '../../server/db.js'
-import type { CaseStatus, Profile, Prisma, Tag, Template } from '../../../generated/prisma/client.js'
+import type {
+  CaseStatus,
+  PenalCharge,
+  Profile,
+  Prisma,
+  Tag,
+  Template,
+} from '../../../generated/prisma/client.js'
+import type { SuspectChargeSummary } from '../../../packages/shared/charges.js'
 import type { searchFilters } from '../../../packages/shared/validation.js'
 
 type Wire<T> = T extends Date
@@ -12,7 +20,7 @@ type Wire<T> = T extends Date
       ? { [K in keyof T]: Wire<T[K]> }
       : T
 export type User = Actor
-export type Session = { user: User; csrf: string; timezone: string }
+export type Session = { user: User; csrf: string }
 export type Page<T> = { items: T[]; more: boolean }
 export type RecordRef = { id: string; label: string }
 export type CaseCard = Wire<Prisma.CaseGetPayload<{ select: typeof caseCard }>> & { exact?: boolean }
@@ -21,7 +29,7 @@ export type DocumentMeta = Wire<Prisma.DocumentGetPayload<{ select: typeof docum
 export type DocumentRecord = DocumentMeta & {
   writable: boolean
   meaningful: boolean
-  case: { id: string; number: string; title: string; statusId: string }
+  case: { id: string; number: string; title: string; statusId: string; chargeVersion: number }
 }
 export type ProfileCard = Pick<
   Wire<Profile>,
@@ -41,6 +49,7 @@ export type Activity = {
   id: string
   action: string
   createdAt: string
+  actorName?: string | null
   actor: { displayName: string } | null
   details?: unknown
   target?: string
@@ -53,7 +62,13 @@ export type AdminCatalog = Omit<Catalog, 'tags' | 'statuses'> & {
   database: string
   backup: { at?: string; file?: string } | null
 }
-export type Account = User & { disabledAt: string | null; createdAt: string; activated: boolean }
+export type Account = User & {
+  disabledAt: string | null
+  createdAt: string
+  activated: boolean
+  version: number
+}
+export type Charge = Wire<PenalCharge>
 export type Credential = { code: string; expiresAt: string }
 export type SavedSearch = { id: string; label: string; filters: Partial<z.infer<typeof searchFilters>> }
 export type DashboardData = {
@@ -72,21 +87,30 @@ export type Revision = {
   label: string
   kind: string
   createdAt: string
+  actorName: string | null
   actor: User | null
 }
 export type Durable = { epoch: number; stateHash: string; failed: boolean }
 export type Packet = {
   format: string
   exportedAt: string
-  case: CaseRecord
+  case: Omit<
+    CaseRecord,
+    'persons' | 'documents' | 'evidence' | 'tasks' | 'favorites' | 'preArchiveStatus'
+  > & {
+    persons: Omit<CaseRecord['persons'][number], 'charges'>[]
+  }
   documents: {
     id: string
     title: string
     type: DocumentMeta['type']
     plainText: string
     amended: boolean
+    legalDraft: boolean
     submitted: { plainText: string; createdAt: string } | null
   }[]
+  charges: SuspectChargeSummary[]
+  submittedCharges: SuspectChargeSummary[] | null
   evidence: CaseRecord['evidence']
   tasks: CaseRecord['tasks']
 }

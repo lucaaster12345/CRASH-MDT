@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, instant, nullable, selected, string, timeValue } from './api.js'
 import { useCatalog, useDate, useNotice, useResource, useSession } from './state.js'
 import {
@@ -19,6 +19,8 @@ import {
 } from './ui.js'
 import {
   documentTypes,
+  isLegalDocument,
+  legalDocumentTypes,
   labels,
   personRoles,
   priorities,
@@ -26,18 +28,19 @@ import {
 } from '../../../packages/shared/validation.js'
 import type { Activity, CaseRecord, Page, User } from './types.js'
 import { EvidenceSection, TasksSection } from './case-items.js'
+import { SuspectCharges } from './charges.js'
 
 export const officer = (user: User | null) =>
   user ? [{ id: user.id, label: user.displayName + (user.badge ? ' · ' + user.badge : '') }] : []
 const sections = ['Overview', 'People', 'Documents', 'Evidence', 'Tasks', 'Activity'] as const
 type Section = (typeof sections)[number]
 
-function caseInput(form: FormData) {
+function caseInput(form: FormData, original?: string | null) {
   return {
     title: string(form, 'title'),
     summary: string(form, 'summary'),
     priority: string(form, 'priority'),
-    occurredAt: instant(form, 'occurredAt'),
+    occurredAt: instant(form, 'occurredAt', original),
     restricted: form.has('restricted'),
     leadId: nullable(form, 'leadId'),
     memberIds: selected(form, 'memberIds'),
@@ -63,7 +66,7 @@ function CaseFields({ record }: { record?: CaseRecord }) {
           ))}
         </select>
       </Field>
-      <Field label="Incident date and time (UTC)">
+      <Field label="Incident date and time (local)">
         <input type="datetime-local" name="occurredAt" defaultValue={timeValue(record?.occurredAt)} />
       </Field>
       <Lookup
@@ -214,7 +217,7 @@ function Overview({ record }: { record: CaseRecord }) {
               submit={async (form) => {
                 await api(casePath(record), {
                   method: 'PATCH',
-                  data: { ...caseInput(form), version: editing.version },
+                  data: { ...caseInput(form, editing.occurredAt), version: editing.version },
                 })
                 setEditing(null)
               }}
@@ -238,7 +241,8 @@ function Overview({ record }: { record: CaseRecord }) {
                   <span className="muted">
                     {!report.submitted
                       ? 'Working draft'
-                      : report.stateHash === report.submitted.stateHash
+                      : report.stateHash === report.submitted.stateHash &&
+                          (report.submitted.chargeVersion ?? 0) === record.chargeVersion
                         ? 'Submitted ' + date(report.submitted.createdAt)
                         : 'Amended · pending review'}
                   </span>
@@ -463,6 +467,7 @@ function People({ record }: { record: CaseRecord }) {
                       )}
                       {person.user && <p className="muted">{officer(person.user)[0]?.label}</p>}
                       {person.detail && <p className="preserve">{person.detail}</p>}
+                      {person.role === 'SUSPECT' && <SuspectCharges record={record} person={person} />}
                     </div>
                     {record.writable && (
                       <div className="actions">
@@ -491,7 +496,9 @@ function People({ record }: { record: CaseRecord }) {
                         </button>
                         <Confirm
                           label="Remove person"
-                          description={'Remove ' + person.name + ' from this case.'}
+                          description={
+                            'Remove ' + person.name + ' and any assigned charges from this case.'
+                          }
                           run={() =>
                             remove(casePath(record) + '/persons/' + person.id, {
                               version: record.version,
@@ -513,7 +520,7 @@ function People({ record }: { record: CaseRecord }) {
 }
 
 function Documents({ record }: { record: CaseRecord }) {
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState<'document' | 'legal' | null>(null)
   const [linking, setLinking] = useState<number | null>(null)
   const navigate = useNavigate()
   const date = useDate()
@@ -529,7 +536,8 @@ function Documents({ record }: { record: CaseRecord }) {
             <Link to={'/documents/' + report.id}>{report.title}</Link>
             <span className="muted">
               {report.submitted
-                ? report.submitted.stateHash === report.stateHash
+                ? report.submitted.stateHash === report.stateHash &&
+                  (report.submitted.chargeVersion ?? 0) === record.chargeVersion
                   ? 'Submitted ' + date(report.submitted.createdAt)
                   : 'Amended · pending review'
                 : 'Working draft'}
@@ -540,12 +548,17 @@ function Documents({ record }: { record: CaseRecord }) {
       <section className="surface padded">
         <div className="section-head">
           <h2>Supporting documents</h2>
-          {record.writable && !adding && <button onClick={() => setAdding(true)}>New document</button>}
+          {record.writable && !adding && (
+            <div className="actions">
+              <button onClick={() => setAdding('document')}>New document</button>
+              <button onClick={() => setAdding('legal')}>Draft legal paperwork</button>
+            </div>
+          )}
         </div>
         {record.writable && adding && (
           <ActionForm
-            label="Create document"
-            onCancel={() => setAdding(false)}
+            label={adding === 'legal' ? 'Create legal draft' : 'Create document'}
+            onCancel={() => setAdding(null)}
             success="Document created."
             className="edit-block"
             submit={async (form) => {
@@ -558,7 +571,7 @@ function Documents({ record }: { record: CaseRecord }) {
                   template: form.has('template'),
                 },
               })
-              setAdding(false)
+              setAdding(null)
               navigate('/documents/' + doc.id)
             }}
           >
@@ -567,20 +580,24 @@ function Documents({ record }: { record: CaseRecord }) {
                 <input required name="title" maxLength={180} />
               </Field>
               <Field label="Document type">
-                <select name="type" defaultValue="NOTES">
-                  {documentTypes
-                    .filter((type) => type !== 'INCIDENT')
-                    .map((type) => (
-                      <option value={type} key={type}>
-                        {labels[type]}
-                      </option>
-                    ))}
+                <select name="type" defaultValue={adding === 'legal' ? 'SUBPOENA' : 'NOTES'}>
+                  {(adding === 'legal'
+                    ? legalDocumentTypes
+                    : documentTypes.filter((type) => type !== 'INCIDENT' && !isLegalDocument(type))
+                  ).map((type) => (
+                    <option value={type} key={type}>
+                      {labels[type]}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field label="Category">
                 <input name="category" maxLength={100} />
               </Field>
             </div>
+            {adding === 'legal' && (
+              <p className="muted">Choose an editable draft template for review and approval.</p>
+            )}
             <label className="check">
               <input type="checkbox" name="template" defaultChecked />
               Start with template headings
@@ -599,7 +616,7 @@ function Documents({ record }: { record: CaseRecord }) {
                       <div>
                         <Link to={'/documents/' + doc.id}>{doc.title}</Link>
                         <span className="minor">
-                          {labels[doc.type]} · {doc.author.displayName}
+                          {labels[doc.type]} · {doc.authorName}
                         </span>
                       </div>
                       <time>{date(doc.updatedAt)}</time>
@@ -705,6 +722,18 @@ function CaseActivity({ record }: { record: CaseRecord }) {
 
 export function CasePage({ record }: { record: CaseRecord }) {
   const [section, setSection] = useState<Section>('Overview')
+  const location = useLocation()
+  const path = casePath(record)
+  useEffect(() => {
+    if (location.pathname !== path) return
+    const requested = new URLSearchParams(location.search).get('section')
+    const target = sections.find((item) => item === requested)
+    // A direct link can open a section in an already mounted workspace tab.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (target) setSection(target)
+  }, [location, path])
+  const { user } = useSession()
+  const navigate = useNavigate()
   const date = useDate()
   const pinned = record.favorites.length > 0
   return (
@@ -736,6 +765,22 @@ export function CasePage({ record }: { record: CaseRecord }) {
             >
               {pinned ? 'Unpin case' : 'Pin case'}
             </AsyncButton>
+            {user.role === 'ADMIN' && (
+              <Confirm
+                label="Delete case"
+                danger
+                confirmation={record.number}
+                description={
+                  'Permanently remove ' +
+                  record.number +
+                  ', including documents, charges, evidence references, and tasks. Audit events remain.'
+                }
+                run={async (confirmation) => {
+                  await remove(casePath(record), { version: record.version, confirmation })
+                  navigate('/cases')
+                }}
+              />
+            )}
             <Link className="button" to={casePath(record) + '/packet'}>
               Case packet
             </Link>

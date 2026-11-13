@@ -8,6 +8,9 @@ import { CasePage, NewCase } from './case-page.js'
 import { ProfilePage, NewProfile } from './profile-page.js'
 import { Administration } from './admin-page.js'
 import { PacketPage } from './packet.js'
+import { AccountSecurity } from './account-security.js'
+import { PenalCode } from './charges.js'
+import { PageHead } from './ui.js'
 import type { CaseRecord, DocumentRecord, Paths, ProfileRecord, Session } from './types.js'
 
 type Tab = { kind: Paths; id: string }
@@ -320,11 +323,15 @@ function Workspace({ session, onEnd }: { session: Session; onEnd: (lost: boolean
         ? (labels[activePath] ?? 'Record')
         : pathname === '/'
           ? 'Dashboard'
-          : pathname.startsWith('/admin')
-            ? 'Administration'
-            : pathname.startsWith('/profiles')
-              ? 'Civilian profiles'
-              : 'Cases') + ' · C.R.A.S.H. MDT'
+          : pathname === '/account'
+            ? 'Account security'
+            : pathname === '/penal-code'
+              ? 'Penal code'
+              : pathname.startsWith('/admin')
+                ? 'Administration'
+                : pathname.startsWith('/profiles')
+                  ? 'Civilian profiles'
+                  : 'Cases') + ' · C.R.A.S.H. MDT'
   }, [pathname, activePath, labels])
 
   async function signOut() {
@@ -344,6 +351,17 @@ function Workspace({ session, onEnd }: { session: Session; onEnd: (lost: boolean
   else if (pathname === '/cases' || pathname === '/search')
     general = <Directory kind="cases" key={pathname} />
   else if (pathname === '/profiles') general = <Directory kind="profiles" />
+  else if (pathname === '/penal-code')
+    general = (
+      <div className="page">
+        <PageHead title="Penal code" />
+        <PenalCode />
+      </div>
+    )
+  else if (pathname === '/account')
+    general = (
+      <AccountSecurity hasPending={hasPending} onPasswordChanged={() => ending.current(false)} />
+    )
   else if (pathname === '/cases/new' && session.user.role !== 'VIEWER') general = <NewCase />
   else if (pathname === '/profiles/new' && session.user.role !== 'VIEWER') general = <NewProfile />
   else if (pathname === '/admin' && session.user.role === 'ADMIN') general = <Administration />
@@ -375,9 +393,11 @@ function Workspace({ session, onEnd }: { session: Session; onEnd: (lost: boolean
                 </NavLink>
                 <NavLink to="/cases">Cases</NavLink>
                 <NavLink to="/profiles">Civilian profiles</NavLink>
+                <NavLink to="/penal-code">Penal code</NavLink>
                 {session.user.role === 'ADMIN' && <NavLink to="/admin">Administration</NavLink>}
               </nav>
               <div className="rail-user">
+                <Link to="/account">Account security</Link>
                 <strong>{session.user.displayName}</strong>
                 <span>
                   {session.user.badge ? session.user.badge + ' · ' : ''}

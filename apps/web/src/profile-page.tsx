@@ -13,6 +13,7 @@ import {
   RemoteImage,
   ResourceView,
   SelectOptions,
+  remove,
 } from './ui.js'
 import type { Page, ProfileCard, ProfileRecord } from './types.js'
 
@@ -153,6 +154,7 @@ export function NewProfile() {
 export function ProfilePage({ record }: { record: ProfileRecord }) {
   const [editing, setEditing] = useState<ProfileRecord | null>(null)
   const { user } = useSession()
+  const navigate = useNavigate()
   const catalog = useCatalog()
   const date = useDate()
   const path = '/profiles/' + record.id
@@ -179,6 +181,22 @@ export function ProfilePage({ record }: { record: ProfileRecord }) {
                 <button className="primary" onClick={() => setEditing(record)}>
                   Edit profile
                 </button>
+              )}
+              {user.role === 'ADMIN' && (
+                <Confirm
+                  label="Delete profile"
+                  danger
+                  confirmation="DELETE"
+                  description={
+                    'Permanently remove the civilian profile for ' +
+                    record.fullName +
+                    '. Its case appearances retain their recorded names.'
+                  }
+                  run={async (confirmation) => {
+                    await remove(path, { version: record.version, confirmation })
+                    navigate('/profiles')
+                  }}
+                />
               )}
               <Confirm
                 label={record.archivedAt ? 'Restore profile' : 'Archive profile'}

@@ -4,7 +4,7 @@ Use one instance of the application, PostgreSQL and Caddy. Start with 2 vCPUs, 4
 
 1. Install Docker Engine and the Compose v2 plugin from the official Ubuntu instructions. Confirm `docker compose version`. [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
 2. Point the domain's A record to the server. Publish an AAAA record only if IPv6 reaches the same host. Allow inbound TCP 80 and 443 and keep SSH restricted to your administration sources. Docker publishes ports using its own firewall rules. Check the provider firewall and Docker rules in addition to UFW. [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
-3. Copy the source and set `.env` permissions to owner-only. Fill `DOMAIN`, `ACME_EMAIL`, `DB_PASSWORD` and `DISPLAY_TIMEZONE`. Generate the database password with `openssl rand -hex 32`. Keep secrets out of shell history and version control.
+3. Copy the source and set `.env` permissions to owner-only. Fill `DOMAIN`, `ACME_EMAIL` and `DB_PASSWORD`. Generate the database password with `openssl rand -hex 32`. Keep secrets out of shell history and version control.
 4. From the project directory, start the stack.
 
 ```sh
@@ -30,7 +30,15 @@ Verify `https://YOUR_DOMAIN/api/health`, sign in over HTTPS and test a document 
 
 1. Keep a copy of the current source, image identifier and production configuration.
 2. Stop Caddy to pause new traffic. Let investigators confirm **Saved** before maintenance, then stop the app. Run the backup script and retain its validated dump.
-3. Install the new source, review the migrations, and run `docker compose -f compose.production.yaml up -d --build`. Check migration logs, health, login and a two-session document edit.
+3. Install the new source and review the migrations. For an existing deployment, rebuild the image, run the one-shot migration explicitly, then bring the application and proxy back up:
+
+   ```sh
+   docker compose -f compose.production.yaml build app
+   docker compose -f compose.production.yaml run --rm migrate
+   docker compose -f compose.production.yaml up -d
+   ```
+
+   Check migration logs, health, login and a two-session document edit.
 4. Roll back the application image only if the old version supports the current schema. If it does not, restore the pre-update dump into a fresh Compose project and start the matching earlier source. Verify it before routing traffic to it. Changes made after the backup are outside that rollback point.
 
 ## Operations

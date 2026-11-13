@@ -54,7 +54,7 @@ function EvidenceForm({
             type: string(form, 'type'),
             description: string(form, 'description'),
             sourceUrl: nullable(form, 'sourceUrl'),
-            collectedAt: instant(form, 'collectedAt'),
+            collectedAt: instant(form, 'collectedAt', initial?.collectedAt),
             personId: nullable(form, 'personId'),
             documentId: nullable(form, 'documentId'),
             version: initial?.version,
@@ -95,7 +95,7 @@ function EvidenceForm({
             defaultValue={initial?.description}
           />
         </Field>
-        <Field label="Collected date and time (UTC)">
+        <Field label="Collected date and time (local)">
           <input
             type="datetime-local"
             name="collectedAt"
@@ -154,7 +154,7 @@ function EvidenceRow({ record, item, edit }: { record: CaseRecord; item: Evidenc
           <span className="record-code">E-{String(item.reference).padStart(3, '0')}</span>
           <h3>{item.title}</h3>
           <div className="muted">
-            {labels[item.type]} · Submitted by {item.submittedBy.displayName} · {date(item.createdAt)}
+            {labels[item.type]} · Submitted by {item.submittedByName} · {date(item.createdAt)}
           </div>
         </div>
         {record.writable && (
@@ -285,7 +285,7 @@ function TaskForm({
             description: string(form, 'description'),
             priority: string(form, 'priority'),
             status: string(form, 'status'),
-            dueAt: instant(form, 'dueAt'),
+            dueAt: instant(form, 'dueAt', initial?.dueAt),
             assigneeId: nullable(form, 'assigneeId'),
             documentId: nullable(form, 'documentId'),
             evidenceId: nullable(form, 'evidenceId'),
@@ -313,7 +313,7 @@ function TaskForm({
             initial?.assignee ? [{ id: initial.assignee.id, label: initial.assignee.displayName }] : []
           }
         />
-        <Field label="Due date and time (UTC)">
+        <Field label="Due date and time (local)">
           <input type="datetime-local" name="dueAt" defaultValue={timeValue(initial?.dueAt)} />
         </Field>
         <Field label="Priority">
@@ -391,9 +391,9 @@ export function TasksSection({ record }: { record: CaseRecord }) {
                 <td>{labels[item.priority]}</td>
                 <td>
                   {labels[item.status]}
-                  {item.completedBy && (
+                  {item.completedByName && (
                     <span className="minor">
-                      {item.completedBy.displayName} · {date(item.completedAt)}
+                      {item.completedByName} · {date(item.completedAt)}
                     </span>
                   )}
                 </td>

@@ -11,7 +11,6 @@ x-app: &app
   environment:
     NODE_ENV: development
     APP_ORIGIN: "http://localhost:${LOCAL_PORT:-8080}"
-    DISPLAY_TIMEZONE: "${DISPLAY_TIMEZONE:-UTC}"
     DATABASE_URL: "postgresql://crash:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/crash"
   logging: *logging
 

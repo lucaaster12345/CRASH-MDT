@@ -17,6 +17,7 @@ import { attachCollaboration } from './collaboration.js'
 import { subscribe } from './live.js'
 import { visibleCase } from './access.js'
 import { imageHosts } from './settings.js'
+import { caseCharges, penalCode } from './charges.js'
 
 const app = express()
 app.disable('x-powered-by')
@@ -47,7 +48,8 @@ api.use(verifyOrigin, express.json({ limit: '128kb' }))
 api.use('/auth', auth)
 api.use(authenticate)
 api.use('/accounts', accounts)
-api.use('/cases', cases, exports)
+api.use('/cases', cases, exports, caseCharges)
+api.use('/penal-code', penalCode)
 api.use('/cases/:id', caseItems)
 api.use('/profiles', profiles)
 api.use('/documents', documents)

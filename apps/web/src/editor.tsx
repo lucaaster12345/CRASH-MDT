@@ -6,13 +6,22 @@ import type { JSONContent } from '@tiptap/core'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import * as Y from 'yjs'
-import { documentField, richTextExtensions } from '../../../packages/shared/rich-text.js'
+import {
+  documentField,
+  richTextExtensions,
+  starterDocument,
+} from '../../../packages/shared/rich-text.js'
 import {
   documentAccessChanged,
   durabilityProof,
   invalidDocumentUpdate,
 } from '../../../packages/shared/durability.js'
-import { imageAllowed, labels, safeHttps } from '../../../packages/shared/validation.js'
+import {
+  imageAllowed,
+  isLegalDocument,
+  labels,
+  safeHttps,
+} from '../../../packages/shared/validation.js'
 import { api, string } from './api.js'
 import {
   LiveContext,
@@ -35,6 +44,8 @@ import {
   remove,
 } from './ui.js'
 import type { DocumentRecord, Durable, Page, Revision } from './types.js'
+import { ChargeBreakdown, ReportCharges, type ChargeReport } from './charges.js'
+import type { SuspectChargeSummary } from '../../../packages/shared/charges.js'
 
 type Connection = { doc: Y.Doc; provider: HocuspocusProvider }
 type Status =
@@ -196,14 +207,17 @@ function RichEditor({
   writable,
   hosts,
   title,
+  headings,
 }: {
   connection: Connection
   ready: boolean
   writable: boolean
   hosts: string[]
   title: string
+  headings: string[]
 }) {
   const { user } = useSession()
+  const notice = useNotice()
   const [insert, setInsert] = useState<'link' | 'image' | null>(null)
   const [initialHosts] = useState(hosts)
   const extensions = useMemo(
@@ -254,6 +268,41 @@ function RichEditor({
     <>
       {writable && (
         <fieldset className="editor-tools" aria-label="Formatting" disabled={!ready}>
+          <button
+            type="button"
+            disabled={!headings.length}
+            title={
+              headings.length
+                ? 'Append missing template headings'
+                : 'No headings are configured for this document type'
+            }
+            onClick={() => {
+              const present = new Set<string>()
+              editor.state.doc.descendants((node) => {
+                if (node.type.name === 'heading') present.add(node.textContent.trim().toLowerCase())
+              })
+              const missing = headings.filter((heading) => {
+                const key = heading.trim().toLowerCase()
+                if (present.has(key)) return false
+                present.add(key)
+                return true
+              })
+              if (!missing.length) {
+                notice('All template headings are already present.')
+                return
+              }
+              const content = starterDocument(missing).content ?? []
+              const position = editor.isEmpty
+                ? { from: 0, to: editor.state.doc.content.size }
+                : editor.state.doc.content.size
+              if (editor.commands.insertContentAt(position, content)) {
+                editor.commands.focus()
+                notice('Template headings inserted.')
+              }
+            }}
+          >
+            Insert template
+          </button>
           {tool('Undo', () => editor.commands.undo())}
           {tool('Redo', () => editor.commands.redo())}
           <span className="tool-divider" />
@@ -425,7 +474,7 @@ function History({
   const [checkpoint, setCheckpoint] = useState(false)
   const base = '/documents/' + record.id + '/history'
   const revisions = useResource<Page<Revision>>(base + '?page=' + page)
-  const preview = useResource<{ content: JSONContent }>(
+  const preview = useResource<{ content: JSONContent; chargeSummary?: SuspectChargeSummary[] | null }>(
     selection ? base + '/' + selection.id : null,
     false,
   )
@@ -476,7 +525,8 @@ function History({
                         {revision.label}
                       </button>
                       <span className="minor">
-                        {date(revision.createdAt)} · {revision.actor?.displayName ?? 'Autosave'}
+                        {date(revision.createdAt)} ·{' '}
+                        {revision.actorName ?? revision.actor?.displayName ?? 'Autosave'}
                       </span>
                     </div>
                   </li>
@@ -493,7 +543,12 @@ function History({
         <div className="revision-preview">
           <h3>{selection.label}</h3>
           <ResourceView resource={preview}>
-            {(data) => <RevisionContent content={data.content} hosts={hosts} />}
+            {(data) => (
+              <>
+                <RevisionContent content={data.content} hosts={hosts} />
+                {!!data.chargeSummary?.length && <ChargeBreakdown summaries={data.chargeSummary} />}
+              </>
+            )}
           </ResourceView>
           {saved && record.writable && (
             <Confirm
@@ -515,10 +570,12 @@ function DocumentRoom({
   record,
   tabKey,
   hosts,
+  headings,
 }: {
   record: DocumentRecord
   tabKey: string
   hosts: string[]
+  headings: string[]
 }) {
   const { connection, status, saved, ready, error } = useConnection(record, tabKey)
   const [history, setHistory] = useState(false)
@@ -527,18 +584,30 @@ function DocumentRoom({
   const notice = useNotice()
   const navigate = useNavigate()
   const path = '/documents/' + record.id
+  const incident = record.type === 'INCIDENT'
+  const chargeReport = useResource<ChargeReport>(
+    incident ? '/cases/' + record.case.id + '/charges' : null,
+  )
   async function revision(action: string, detail?: Record<string, string>) {
     if (!saved) throw new Error('Wait for the latest edits to be saved.')
     await api(path + '/history', {
       method: 'POST',
-      data: { action, stateHash: saved, epoch: record.epoch, ...detail },
+      data: {
+        action,
+        stateHash: saved,
+        epoch: record.epoch,
+        chargeVersion: chargeReport.value?.version,
+        ...detail,
+      },
     })
     if (action === 'restore') notice('Document revision restored.')
   }
-  const incident = record.type === 'INCIDENT'
   const amended =
     record.submitted &&
-    (record.submitted.stateHash !== record.stateHash || status === 'Saving' || status === 'Unsynced')
+    (record.submitted.stateHash !== record.stateHash ||
+      (record.submitted.chargeVersion ?? 0) !== record.case.chargeVersion ||
+      status === 'Saving' ||
+      status === 'Unsynced')
   return (
     <div className="page document-page">
       <Link className="crumb" title={record.case.title} to={'/cases/' + record.case.id}>
@@ -550,7 +619,7 @@ function DocumentRoom({
         detail={
           <>
             {record.category && <span>{record.category}</span>}
-            <span>Opened by {record.author.displayName}</span>
+            <span>Opened by {record.authorName}</span>
             {incident && (
               <span className="state">
                 {amended
@@ -566,7 +635,9 @@ function DocumentRoom({
           <>
             {incident &&
               record.writable &&
-              (saved ? (
+              (saved &&
+              chargeReport.value?.version === record.case.chargeVersion &&
+              !chargeReport.error ? (
                 <AsyncButton
                   className="primary"
                   run={() => revision('submit')}
@@ -598,6 +669,11 @@ function DocumentRoom({
           </>
         }
       />
+      {isLegalDocument(record.type) && (
+        <p className="callout">
+          Draft for review. Record the issuing authority and approval before use.
+        </p>
+      )}
       {editing !== null && record.writable && (
         <section className="surface padded">
           <ActionForm
@@ -650,11 +726,15 @@ function DocumentRoom({
             writable={record.writable}
             hosts={hosts}
             title={record.title}
+            headings={headings}
           />
         ) : (
           <Empty>Opening document…</Empty>
         )}
       </div>
+      {incident && (
+        <ReportCharges caseId={record.case.id} writable={record.writable} resource={chargeReport} />
+      )}
       {history && <History record={record} saved={saved} run={revision} hosts={hosts} />}
     </div>
   )
@@ -669,6 +749,7 @@ export function DocumentPage({ record, tabKey }: { record: DocumentRecord; tabKe
           record={record}
           tabKey={tabKey}
           hosts={data.hosts}
+          headings={data.templates.find((item) => item.type === record.type)?.headings ?? []}
           key={record.id + '.' + record.epoch + '.' + record.writable}
         />
       )}

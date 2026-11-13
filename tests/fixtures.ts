@@ -27,7 +27,6 @@ export function testEnvironment(origin: string) {
     BIND_HOST: '127.0.0.1',
     PORT: url.port,
     TRUST_PROXY: '0',
-    DISPLAY_TIMEZONE: 'UTC',
   }
 }
 
@@ -55,8 +54,10 @@ export async function start(origin: string) {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''
+  let listening = false
   server.stdout?.on('data', (data) => {
     output += String(data)
+    listening ||= output.includes('C.R.A.S.H. MDT listening on 127.0.0.1:' + new URL(origin).port)
     if (process.env.TEST_DEBUG) process.stdout.write(data)
   })
   server.stderr?.on('data', (data) => {
@@ -66,7 +67,8 @@ export async function start(origin: string) {
   try {
     await until(
       async () => {
-        if (server.exitCode !== null) throw new Error(output)
+        if (server.exitCode !== null || server.signalCode !== null) throw new Error(output)
+        if (!listening) return false
         const response = await fetch(origin + '/api/health', {
           signal: AbortSignal.timeout(750),
         }).catch(() => null)

@@ -24,6 +24,8 @@ import {
 } from './fixtures.js'
 import type { Actor } from '../apps/server/db.js'
 import type { CaseRecord, DocumentRecord, Durable, Page, ProfileRecord } from '../apps/web/src/types.js'
+import type { Account, Charge, Packet } from '../apps/web/src/types.js'
+import type { ChargeReport } from '../apps/web/src/charges.js'
 import { durabilityProof } from '../packages/shared/durability.js'
 
 const origin = 'http://127.0.0.1:38507'
@@ -41,7 +43,7 @@ let documentId: string
 const editorCleanups = new Set<() => void>()
 
 before(async () => {
-  await db.$executeRaw`TRUNCATE "User", "Profile", "Case", "Tag", "Audit", "Setting" RESTART IDENTITY CASCADE`
+  await db.$executeRaw`TRUNCATE "User", "Profile", "Case", "Tag", "Audit", "Setting", "PenalCharge" RESTART IDENTITY CASCADE`
   await account(origin, 'bootstrap', masterPassword)
   server = await start(origin)
 })
@@ -611,6 +613,246 @@ test('items, unsafe URL rejection, search by person and tag, and history retenti
     profile.id,
   )
   await writer.client.call('/documents/' + record.documents[0]!.id, 'DELETE', { version: 1 }, 409)
+})
+
+test('charge catalog permissions, local calendar search, and submitted charge snapshots', async () => {
+  const draft = await openCase(writer.client, 'Fictional east district review', {
+    occurredAt: '2026-11-12T05:00:00.000Z',
+  })
+  const route = '/cases/' + draft.id
+  const report = draft.documents[0]!
+  const catalogInput = {
+    code: 'Q-104',
+    title: 'Fictional ordinance entry',
+    custodyMinutes: 45,
+    fineCents: 1545,
+  }
+  await writer.client.call('/penal-code', 'POST', catalogInput, 403)
+  const charge = await admin.call<Charge>('/penal-code', 'POST', catalogInput, 201)
+  const edit = {
+    ...catalogInput,
+    custodyMinutes: 90,
+    fineCents: 2550,
+    archived: false,
+    version: charge.version,
+  }
+  await writer.client.call('/penal-code/' + charge.id, 'PATCH', edit, 403)
+  const search = await viewer.client.call<Page<Charge>>('/penal-code?q=q-104')
+  assert.equal(search.items[0]?.id, charge.id)
+  const localDay = '/search/cases?q=east%20district&from=2026-11-11&to=2026-11-11'
+  const pacific = await writer.client.call<Page<CaseRecord>>(
+    localDay + '&timeZone=America%2FLos_Angeles',
+  )
+  assert.equal(pacific.items[0]?.id, draft.id)
+  assert.deepEqual((await writer.client.call<Page<CaseRecord>>(localDay + '&timeZone=UTC')).items, [])
+
+  const person = await writer.client.call<{ id: string }>(
+    route + '/persons',
+    'POST',
+    {
+      name: 'Fictional Casey',
+      role: 'SUSPECT',
+      version: draft.version,
+    },
+    201,
+  )
+  const record = await writer.client.call<CaseRecord>(route)
+  const assignment = route + '/persons/' + person.id + '/charges'
+  const initial = {
+    version: record.version,
+    charges: [{ chargeId: charge.id, count: 2, fineCents: 0 }],
+  }
+  await viewer.client.call(assignment, 'PUT', initial, 403)
+  await writer.client.call(assignment, 'PUT', initial, 204)
+  await writer.client.call(assignment, 'PUT', initial, 409)
+  await admin.call('/penal-code/' + charge.id, 'PATCH', edit, 204)
+  await admin.call('/penal-code/' + charge.id, 'PATCH', edit, 409)
+  let calculated = await writer.client.call<ChargeReport>(route + '/charges')
+  assert.equal(calculated.suspects[0]?.fineCents, 3090)
+  assert.equal(calculated.suspects[0]?.custodyMinutes, 90)
+  const collab = connect(writer.client, report.id, report.epoch)
+  await until(collab.synced, 'New case report editor')
+  addParagraph(collab.doc, 'The witness provided a dated statement about the incident.')
+  await until(
+    async () =>
+      (await writer.client.call<Durable>('/documents/' + report.id + '/durable')).stateHash ===
+      stateHash(collab.doc),
+    'Saved narrative',
+  )
+  const history = '/documents/' + report.id + '/history'
+  const submit = { action: 'submit', epoch: report.epoch, stateHash: stateHash(collab.doc) }
+  await writer.client.call(history, 'POST', { ...submit, chargeVersion: 0 }, 409)
+  await writer.client.call(history, 'POST', { ...submit, chargeVersion: calculated.version }, 204)
+  collab.stop()
+  const current = await writer.client.call<CaseRecord>(route)
+  await writer.client.call(
+    assignment,
+    'PUT',
+    { version: current.version, charges: [{ chargeId: charge.id, count: 3 }] },
+    204,
+  )
+  calculated = await writer.client.call<ChargeReport>(route + '/charges')
+  assert.equal(calculated.suspects[0]?.fineCents, 4635)
+  const legal = await writer.client.call<DocumentRecord>(
+    '/documents/case/' + draft.id,
+    'POST',
+    { title: 'Fictional records request', type: 'SUBPOENA' },
+    201,
+  )
+  const stored = await db.document.findUniqueOrThrow({ where: { id: legal.id } })
+  assert.match(stored.plainText, /Issuing authority and approval/)
+  const packetBody = { documents: [report.id, legal.id], evidence: false, tasks: false }
+  const packet = await writer.client.call<Packet>(route + '/export', 'POST', packetBody)
+  assert.equal(packet.charges[0]?.fineCents, 4635)
+  assert.equal(packet.submittedCharges?.[0]?.fineCents, 3090)
+  assert.equal(packet.documents.find((doc) => doc.id === report.id)?.amended, true)
+  assert.equal(packet.documents.find((doc) => doc.id === legal.id)?.legalDraft, true)
+  const excluded = await writer.client.call<Packet>(route + '/export', 'POST', {
+    ...packetBody,
+    charges: false,
+  })
+  assert.deepEqual(excluded.charges, [])
+  assert.equal(excluded.submittedCharges, null)
+  assert.ok(!JSON.stringify(excluded.case.persons).includes('fineCents'))
+  const latest = await writer.client.call<CaseRecord>(route)
+  await writer.client.call(
+    route + '/status',
+    'POST',
+    { action: 'move', status: 'active', version: latest.version },
+    409,
+  )
+})
+
+test('account security, deletion restrictions and retained historical attribution', async () => {
+  const member = await provision(admin, 'INVESTIGATOR', 'Fictional Archive Member')
+  const additional = new Client(origin)
+  await additional.call('/auth/login', 'POST', {
+    username: member.user.username,
+    password: issuedPassword,
+  })
+  const record = await openCase(member.client, 'Fictional cleanup test case', {
+    leadId: member.user.id,
+    memberIds: [member.user.id],
+  })
+  const route = '/cases/' + record.id
+  const document = record.documents[0]!
+  const evidence = await member.client.call<{ id: string }>(
+    route + '/evidence',
+    'POST',
+    { title: 'Fictional item', type: 'NOTE' },
+    201,
+  )
+  await member.client.call(
+    route + '/evidence/' + evidence.id + '/notes',
+    'POST',
+    { note: 'Fictional note' },
+    201,
+  )
+  await member.client.call(
+    route + '/tasks',
+    'POST',
+    {
+      description: 'Test linked references',
+      evidenceId: evidence.id,
+      documentId: document.id,
+      status: 'DONE',
+    },
+    201,
+  )
+  const profile = await member.client.call<ProfileRecord>(
+    '/profiles',
+    'POST',
+    { fullName: 'Fictional cleanup profile' },
+    201,
+  )
+  await member.client.call(
+    route + '/persons',
+    'POST',
+    { name: 'Name as recorded', role: 'WITNESS', profileId: profile.id, version: record.version },
+    201,
+  )
+
+  assert.equal((await member.client.call<{ otherSessions: number }>('/auth/sessions')).otherSessions, 1)
+  await member.client.call('/auth/sessions', 'DELETE', undefined, 204)
+  await additional.call('/auth/session', 'GET', undefined, 401)
+  const changedPassword = 'Replacement test password ' + randomBytes(8).toString('hex')
+  await member.client.call(
+    '/auth/password',
+    'POST',
+    { current: 'incorrect password', password: changedPassword },
+    422,
+  )
+  await member.client.call(
+    '/auth/password',
+    'POST',
+    { current: issuedPassword, password: changedPassword },
+    204,
+  )
+  await member.client.call('/auth/session', 'GET', undefined, 401)
+  await member.client.call('/auth/login', 'POST', {
+    username: member.user.username,
+    password: changedPassword,
+  })
+
+  const accountPath = '/accounts/' + member.user.id
+  const listed = await admin.call<Page<Account>>('/accounts?q=' + member.user.username)
+  const user = listed.items.find((item) => item.id === member.user.id)!
+  const renamed = member.user.username + '-new'
+  const newAccount = {
+    username: renamed,
+    displayName: 'Fictional Renamed Member',
+    badge: 'TEST-1',
+    role: 'INVESTIGATOR',
+    version: user.version,
+  }
+  await writer.client.call(accountPath, 'PATCH', newAccount, 403)
+  await admin.call(accountPath, 'PATCH', newAccount, 204)
+  await admin.call(accountPath, 'PATCH', newAccount, 409)
+  await member.client.call('/auth/session', 'GET', undefined, 401)
+  await member.client.call('/auth/login', 'POST', { username: renamed, password: changedPassword })
+  const live = connect(member.client, document.id, document.epoch)
+  await until(live.synced, 'Account deletion editor')
+  await admin.call(accountPath, 'DELETE', { version: user.version + 1, confirmation: 'wrong' }, 422)
+  await admin.call(accountPath, 'DELETE', { version: user.version + 1, confirmation: renamed }, 204)
+  await until(live.closed, 'Deleting account disconnects editor')
+  live.stop()
+  await member.client.call('/auth/session', 'GET', undefined, 401)
+  let remaining = await admin.call<CaseRecord>(route)
+  assert.equal(remaining.documents[0]?.author, null)
+  assert.equal(remaining.documents[0]?.authorName, 'Fictional Archive Member')
+  assert.equal(remaining.evidence[0]?.submittedByName, 'Fictional Archive Member')
+  assert.equal(remaining.tasks[0]?.completedByName, 'Fictional Archive Member')
+  assert.equal(remaining.lead, null)
+  assert.deepEqual(remaining.members, [])
+
+  const profilePath = '/profiles/' + profile.id
+  await writer.client.call(
+    profilePath,
+    'DELETE',
+    { confirmation: 'DELETE', version: profile.version },
+    403,
+  )
+  await admin.call(profilePath, 'DELETE', { confirmation: 'DELETE', version: profile.version }, 204)
+  await admin.call(profilePath, 'GET', undefined, 404)
+  remaining = await admin.call<CaseRecord>(route)
+  assert.equal(remaining.persons[0]?.name, 'Name as recorded')
+  assert.equal(remaining.persons[0]?.profileId, null)
+
+  const adminSocket = connect(admin, document.id, document.epoch)
+  await until(adminSocket.synced, 'Open editor before case deletion')
+  await writer.client.call(
+    route,
+    'DELETE',
+    { confirmation: record.number, version: remaining.version },
+    403,
+  )
+  await admin.call(route, 'DELETE', { confirmation: record.number, version: remaining.version }, 204)
+  await until(adminSocket.closed, 'Case deletion disconnects editor')
+  adminSocket.stop()
+  await admin.call(route, 'GET', undefined, 404)
+  await admin.call('/documents/' + document.id, 'GET', undefined, 404)
+  assert.equal(await db.custodyNote.count({ where: { evidenceId: evidence.id } }), 0)
+  assert.equal(await db.audit.count({ where: { caseId: record.id, action: 'case.deleted' } }), 1)
 })
 
 test(

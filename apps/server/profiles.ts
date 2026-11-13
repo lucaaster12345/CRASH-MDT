@@ -9,7 +9,7 @@ import {
   text,
   version,
 } from '../../packages/shared/validation.js'
-import { actor, lockIdentity, requireEditor } from './auth.js'
+import { actor, lockIdentity, requireAdmin, requireEditor } from './auth.js'
 import { audit, auditValues, db, publicUser, type Database } from './db.js'
 import { check, checkVersion } from './errors.js'
 import { visibleCase } from './access.js'
@@ -73,7 +73,7 @@ profiles.get('/:id', async (req, res) => {
     where: { target: 'profile', targetId: record.id },
     take: 30,
     orderBy: { createdAt: 'desc' },
-    select: { id: true, action: true, createdAt: true, actor: { select: publicUser } },
+    select: { id: true, action: true, createdAt: true, actorName: true, actor: { select: publicUser } },
   })
   res.json({ ...record, history })
 })
@@ -122,6 +122,26 @@ profiles.patch('/:id', async (req, res) => {
       profileId,
       auditValues({ before: record, after: input }),
     )
+  })
+  publish()
+  res.sendStatus(204)
+})
+
+profiles.delete('/:id', async (req, res) => {
+  requireAdmin(actor(req))
+  const profileId = id.parse(req.params.id)
+  const input = z.object({ version, confirmation: z.literal('DELETE') }).parse(req.body)
+  await db.$transaction(async (tx) => {
+    const user = await lockIdentity(tx, req.identity!)
+    requireAdmin(user)
+    await tx.$queryRaw`SELECT id FROM "Profile" WHERE id = ${profileId} FOR UPDATE`
+    const record = await tx.profile.findUnique({ where: { id: profileId } })
+    check(record, 404, 'Profile not found.')
+    checkVersion(record.version, input.version)
+    await tx.$executeRaw`UPDATE "Case" SET version = version + 1
+      WHERE id IN (SELECT "caseId" FROM "CasePerson" WHERE "profileId" = ${profileId})`
+    await tx.profile.delete({ where: { id: profileId } })
+    await audit(tx, user.id, 'profile.deleted', 'profile', profileId)
   })
   publish()
   res.sendStatus(204)

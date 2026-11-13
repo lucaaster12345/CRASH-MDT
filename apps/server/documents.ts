@@ -16,6 +16,7 @@ import { documentMeta } from './cases.js'
 import { decodeDocument, initialDocument } from './document-state.js'
 import { publish } from './live.js'
 import { checkNoPending, roomName, storageFailed } from './collaboration.js'
+import { suspectChargeSummary } from './charges.js'
 
 async function findDocument(user: Actor, documentId: string) {
   const doc = await db.document.findFirst({
@@ -23,7 +24,7 @@ async function findDocument(user: Actor, documentId: string) {
     select: {
       ...documentMeta,
       narrativeText: true,
-      case: { select: { id: true, number: true, title: true, statusId: true } },
+      case: { select: { id: true, number: true, title: true, statusId: true, chargeVersion: true } },
     },
   })
   check(doc, 404, 'Document not found or access has changed.')
@@ -52,7 +53,13 @@ documents.post('/case/:caseId', async (req, res) => {
       ? ((await tx.template.findUnique({ where: { type: input.type } }))?.headings ?? [])
       : []
     const document = await tx.document.create({
-      data: { ...fields, caseId, authorId: user.id, ...initialDocument(headings) },
+      data: {
+        ...fields,
+        caseId,
+        authorId: user.id,
+        authorName: user.displayName,
+        ...initialDocument(headings),
+      },
       select: documentMeta,
     })
     await audit(
@@ -157,7 +164,14 @@ documents.get('/:id/history', async (req, res) => {
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     skip: (page - 1) * 30,
     take: 31,
-    select: { id: true, label: true, kind: true, createdAt: true, actor: { select: publicUser } },
+    select: {
+      id: true,
+      label: true,
+      kind: true,
+      createdAt: true,
+      actorName: true,
+      actor: { select: publicUser },
+    },
   })
   res.json({ items: items.slice(0, 30), more: items.length > 30 })
 })
@@ -177,11 +191,16 @@ documents.post('/:id/history', async (req, res) => {
   const input = z
     .discriminatedUnion('action', [
       z.object({ action: z.literal('checkpoint'), label: requiredText(120), stateHash: hash, epoch }),
-      z.object({ action: z.literal('submit'), stateHash: hash, epoch }),
+      z.object({
+        action: z.literal('submit'),
+        stateHash: hash,
+        epoch,
+        chargeVersion: z.number().int().nonnegative().optional(),
+      }),
       z.object({ action: z.literal('restore'), revisionId: id, stateHash: hash, epoch }),
     ])
     .parse(req.body)
-  await withCase(req, caseId, async (tx, user) => {
+  await withCase(req, caseId, async (tx, user, record) => {
     const current = await target(tx, caseId, documentId)
     check(
       current.epoch === input.epoch &&
@@ -192,7 +211,13 @@ documents.post('/:id/history', async (req, res) => {
     )
     const { state, stateHash, plainText, narrativeText } = current
     const content = { state, stateHash, plainText, narrativeText }
-    if (input.action === 'submit') {
+    const submission = input.action === 'submit'
+    if (submission) {
+      check(
+        (input.chargeVersion ?? 0) === record.chargeVersion,
+        409,
+        'Suspect charges changed. Review the updated totals before submitting.',
+      )
       check(
         current.type === 'INCIDENT' && meaningfulNarrative(narrativeText),
         422,
@@ -203,6 +228,13 @@ documents.post('/:id/history', async (req, res) => {
       data: {
         documentId,
         actorId: user.id,
+        actorName: user.displayName,
+        ...(submission
+          ? {
+              chargeVersion: record.chargeVersion,
+              chargeSummary: await suspectChargeSummary(tx, caseId),
+            }
+          : {}),
         ...content,
         label:
           input.action === 'checkpoint'

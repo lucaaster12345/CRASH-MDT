@@ -16,7 +16,7 @@ Open `http://localhost:8080` or the configured port. Use the exact hostname `loc
 
 ## Direct Node development
 
-Use Node 24 LTS (24.11 or newer) and PostgreSQL 17. Create a dedicated database. Set `DATABASE_URL`, `APP_ORIGIN=http://localhost:5173`, and `DISPLAY_TIMEZONE` in `.env` or the shell. Use a database account that can apply migrations.
+Use Node 24 LTS (24.11 or newer) and PostgreSQL 17. Create a dedicated database. Set `DATABASE_URL` and `APP_ORIGIN=http://localhost:5173` in `.env` or the shell. Use a database account that can apply migrations.
 
 ```sh
 npm ci

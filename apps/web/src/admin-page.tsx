@@ -18,11 +18,13 @@ import {
 } from './ui.js'
 import { labels, roles } from '../../../packages/shared/validation.js'
 import type { Account, Activity, AdminCatalog, Credential, Page } from './types.js'
+import { PenalCode } from './charges.js'
 
 const sections = [
   'Accounts',
   'Tags',
   'Case statuses',
+  'Penal code',
   'Document templates',
   'Evidence hosts',
   'Audit log',
@@ -41,10 +43,10 @@ function Accounts() {
   const [roleFor, setRoleFor] = useState<Account | null>(null)
   const results = useResource<Page<Account>>('/accounts' + query({ q: useDebounce(q), page }))
   const available = roles.filter((role) => user.username === 'mercia' || role !== 'ADMIN')
-  async function action(account: Account, action: string, role?: string) {
+  async function action(account: Account, action: string) {
     const result = await api<Partial<Credential>>('/accounts/' + account.id + '/action', {
       method: 'POST',
-      data: { action, role },
+      data: { action },
     })
     if (result.code && result.expiresAt)
       setCredential({ code: result.code, expiresAt: result.expiresAt, username: account.username })
@@ -130,25 +132,54 @@ function Accounts() {
       {roleFor && (
         <ActionForm
           className="edit-block"
-          label="Change role and revoke sessions"
+          key={roleFor.id}
+          label="Save account"
           onCancel={() => setRoleFor(null)}
+          success="Account updated."
           submit={async (form) => {
-            await action(roleFor, 'role', string(form, 'role'))
+            await api('/accounts/' + roleFor.id, {
+              method: 'PATCH',
+              data: {
+                username: string(form, 'username'),
+                displayName: string(form, 'displayName'),
+                badge: string(form, 'badge') || null,
+                role: string(form, 'role'),
+                version: roleFor.version,
+              },
+            })
+            if (credential?.username === roleFor.username) setCredential(null)
             setRoleFor(null)
           }}
         >
-          <Field
-            label={'Role for ' + roleFor.username}
-            hint="Changing the role ends this account’s current sessions."
-          >
-            <select name="role" defaultValue={roleFor.role}>
-              {available.map((role) => (
-                <option key={role} value={role}>
-                  {labels[role]}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <div className="form-grid">
+            <Field label="Username">
+              <input
+                name="username"
+                required
+                minLength={3}
+                maxLength={48}
+                defaultValue={roleFor.username}
+              />
+            </Field>
+            <Field label="Display name">
+              <input name="displayName" required maxLength={140} defaultValue={roleFor.displayName} />
+            </Field>
+            <Field label="Badge or callsign">
+              <input name="badge" maxLength={48} defaultValue={roleFor.badge ?? ''} />
+            </Field>
+            <Field
+              label="Role"
+              hint="Changing the username or role ends current sessions and invalidates outstanding codes."
+            >
+              <select name="role" defaultValue={roleFor.role}>
+                {available.map((role) => (
+                  <option key={role} value={role}>
+                    {labels[role]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
         </ActionForm>
       )}
       <ResourceView resource={results}>
@@ -182,7 +213,7 @@ function Accounts() {
                         {allowed ? (
                           <div className="actions">
                             <button type="button" onClick={() => setRoleFor(account)}>
-                              Change role
+                              Edit account
                             </button>
                             <Confirm
                               label={account.disabledAt ? 'Reactivate account' : 'Disable account'}
@@ -208,6 +239,25 @@ function Accounts() {
                               label="Revoke sessions"
                               description={'Sign ' + account.username + ' out of every active session.'}
                               run={() => action(account, 'revoke')}
+                            />
+                            <Confirm
+                              label="Delete account"
+                              danger
+                              confirmation={account.username}
+                              description={
+                                'Permanently remove sign-in and assignments for ' +
+                                account.username +
+                                '. Case records and historical attribution are kept.'
+                              }
+                              run={async (confirmation) => {
+                                await remove('/accounts/' + account.id, {
+                                  version: account.version,
+                                  confirmation,
+                                })
+                                if (credential?.username === account.username) setCredential(null)
+                                if (roleFor?.id === account.id) setRoleFor(null)
+                                notice('Account deleted.')
+                              }}
                             />
                           </div>
                         ) : account.username === 'mercia' ? (
@@ -525,6 +575,8 @@ export function Administration() {
       </nav>
       {active === 'Accounts' ? (
         <Accounts />
+      ) : active === 'Penal code' ? (
+        <PenalCode admin />
       ) : active === 'Audit log' ? (
         <Audit />
       ) : (

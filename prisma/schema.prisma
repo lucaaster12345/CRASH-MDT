@@ -38,6 +38,10 @@ enum DocumentType {
   ARREST
   SUPPLEMENTAL
   SURVEILLANCE
+  SUBPOENA
+  WARRANT_REQUEST
+  AFFIDAVIT
+  LEGAL_REQUEST
   NOTES
 }
 
@@ -62,6 +66,7 @@ model User {
   role            Role
   password        String?
   disabledAt      DateTime?
+  version         Int           @default(1)
   createdAt       DateTime      @default(now())
   sessions        Session[]
   credentials     Credential[]
@@ -117,6 +122,7 @@ model Case {
   status           CaseStatus     @relation(fields: [statusId], references: [id])
   restricted       Boolean        @default(false)
   version          Int            @default(1)
+  chargeVersion    Int            @default(0)
   nextEvidence     Int            @default(1)
   occurredAt       DateTime?
   openedAt         DateTime       @default(now())
@@ -145,7 +151,7 @@ model CaseMember {
   caseId String
   userId String
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([caseId, userId])
   @@index([userId, caseId])
@@ -200,17 +206,18 @@ model Profile {
 }
 
 model CasePerson {
-  id        String     @id @default(uuid())
+  id        String          @id @default(uuid())
   caseId    String
-  case      Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  case      Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
   role      PersonRole
   name      String
-  detail    String     @default("")
+  detail    String          @default("")
   profileId String?
-  profile   Profile?   @relation(fields: [profileId], references: [id])
+  profile   Profile?        @relation(fields: [profileId], references: [id])
   userId    String?
-  user      User?      @relation(fields: [userId], references: [id])
+  user      User?           @relation(fields: [userId], references: [id])
   evidence  Evidence[]
+  charges   SuspectCharge[]
 
   @@index([caseId, role])
   @@index([profileId])
@@ -245,8 +252,9 @@ model Document {
   title         String
   type          DocumentType
   category      String       @default("")
-  authorId      String
-  author        User         @relation(fields: [authorId], references: [id])
+  authorId      String?
+  author        User?        @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorName    String
   state         Bytes
   stateHash     String
   plainText     String       @default("")
@@ -277,6 +285,9 @@ model Revision {
   narrativeText String
   actorId       String?
   actor         User?     @relation(fields: [actorId], references: [id])
+  actorName     String?
+  chargeVersion Int?
+  chargeSummary Json?
   createdAt     DateTime  @default(now())
   submittedFor  Document? @relation("Submitted")
 
@@ -289,27 +300,28 @@ model Template {
 }
 
 model Evidence {
-  id            String        @id @default(uuid())
-  caseId        String
-  case          Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  reference     Int
-  title         String
-  type          EvidenceType
-  description   String        @default("")
-  sourceUrl     String?
-  collectedAt   DateTime?
-  personId      String?
-  person        CasePerson?   @relation(fields: [personId], references: [id], onDelete: SetNull)
-  documentId    String?
-  document      Document?     @relation(fields: [documentId], references: [id])
-  submittedById String
-  submittedBy   User          @relation(fields: [submittedById], references: [id])
-  version       Int           @default(1)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  removedAt     DateTime?
-  notes         CustodyNote[]
-  tasks         Task[]
+  id              String        @id @default(uuid())
+  caseId          String
+  case            Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  reference       Int
+  title           String
+  type            EvidenceType
+  description     String        @default("")
+  sourceUrl       String?
+  collectedAt     DateTime?
+  personId        String?
+  person          CasePerson?   @relation(fields: [personId], references: [id], onDelete: SetNull)
+  documentId      String?
+  document        Document?     @relation(fields: [documentId], references: [id])
+  submittedById   String?
+  submittedBy     User?         @relation(fields: [submittedById], references: [id], onDelete: SetNull)
+  submittedByName String
+  version         Int           @default(1)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  removedAt       DateTime?
+  notes           CustodyNote[]
+  tasks           Task[]
 
   @@unique([caseId, reference])
 }
@@ -317,7 +329,7 @@ model Evidence {
 model CustodyNote {
   id         String   @id @default(uuid())
   evidenceId String
-  evidence   Evidence @relation(fields: [evidenceId], references: [id])
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
   text       String
   actorId    String
   createdAt  DateTime @default(now())
@@ -326,25 +338,26 @@ model CustodyNote {
 }
 
 model Task {
-  id            String     @id @default(uuid())
-  caseId        String
-  case          Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  description   String
-  assigneeId    String?
-  assignee      User?      @relation("Assignee", fields: [assigneeId], references: [id])
-  dueAt         DateTime?
-  priority      Priority   @default(NORMAL)
-  status        TaskStatus @default(TODO)
-  completedAt   DateTime?
-  completedById String?
-  completedBy   User?      @relation("CompletedBy", fields: [completedById], references: [id])
-  documentId    String?
-  document      Document?  @relation(fields: [documentId], references: [id])
-  evidenceId    String?
-  evidence      Evidence?  @relation(fields: [evidenceId], references: [id])
-  version       Int        @default(1)
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id              String     @id @default(uuid())
+  caseId          String
+  case            Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  description     String
+  assigneeId      String?
+  assignee        User?      @relation("Assignee", fields: [assigneeId], references: [id])
+  dueAt           DateTime?
+  priority        Priority   @default(NORMAL)
+  status          TaskStatus @default(TODO)
+  completedAt     DateTime?
+  completedByName String?
+  completedById   String?
+  completedBy     User?      @relation("CompletedBy", fields: [completedById], references: [id])
+  documentId      String?
+  document        Document?  @relation(fields: [documentId], references: [id])
+  evidenceId      String?
+  evidence        Evidence?  @relation(fields: [evidenceId], references: [id])
+  version         Int        @default(1)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   @@index([caseId, status])
   @@index([assigneeId, status, dueAt])
@@ -373,6 +386,7 @@ model Audit {
   id        String   @id @default(uuid())
   actorId   String?
   actor     User?    @relation(fields: [actorId], references: [id])
+  actorName String?
   action    String
   target    String
   targetId  String
@@ -388,4 +402,31 @@ model Audit {
 model Setting {
   key   String @id
   value Json
+}
+
+model PenalCharge {
+  id             String          @id @default(uuid())
+  code           String          @unique
+  title          String
+  description    String          @default("")
+  custodyMinutes Int
+  fineCents      Int
+  archivedAt     DateTime?
+  version        Int             @default(1)
+  assigned       SuspectCharge[]
+}
+
+model SuspectCharge {
+  personId       String
+  person         CasePerson  @relation(fields: [personId], references: [id], onDelete: Cascade)
+  chargeId       String
+  charge         PenalCharge @relation(fields: [chargeId], references: [id])
+  code           String
+  title          String
+  custodyMinutes Int
+  fineCents      Int
+  count          Int
+
+  @@id([personId, chargeId])
+  @@index([chargeId])
 }

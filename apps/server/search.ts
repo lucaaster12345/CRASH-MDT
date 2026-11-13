@@ -34,12 +34,19 @@ async function searchCases(user: Actor, filters: Filters) {
   if (investigator)
     where.push(Prisma.sql`(c."leadId" = ${investigator} OR EXISTS (
     SELECT 1 FROM "CaseMember" cm WHERE cm."caseId" = c.id AND cm."userId" = ${investigator}))`)
-  if (from) where.push(Prisma.sql`COALESCE(c."occurredAt", c."openedAt") >= ${from}::date`)
-  if (to) where.push(Prisma.sql`COALESCE(c."occurredAt", c."openedAt") < (${to}::date + 1)`)
+  const timeZone = filters.timeZone ?? 'UTC'
+  if (from)
+    where.push(Prisma.sql`COALESCE(c."occurredAt", c."openedAt") >=
+    ((${from}::date::timestamp AT TIME ZONE ${timeZone}) AT TIME ZONE 'UTC')`)
+  if (to)
+    where.push(Prisma.sql`COALESCE(c."occurredAt", c."openedAt") <
+    (((${to}::date + 1)::timestamp AT TIME ZONE ${timeZone}) AT TIME ZONE 'UTC')`)
   if (q) {
     const match = literal(q)
     where.push(Prisma.sql`(
       c.number ILIKE ${match} OR c.title ILIKE ${match} OR
+      EXISTS (SELECT 1 FROM "CasePerson" suspect JOIN "SuspectCharge" charge ON charge."personId" = suspect.id
+        WHERE suspect."caseId" = c.id AND (charge.code ILIKE ${match} OR charge.title ILIKE ${match})) OR
       to_tsvector('simple', c.title || ' ' || c.summary) @@ websearch_to_tsquery('simple', ${q}) OR
       EXISTS (SELECT 1 FROM "Document" d WHERE d."caseId" = c.id AND d."removedAt" IS NULL AND
         to_tsvector('simple', d.title || ' ' || d."plainText") @@ websearch_to_tsquery('simple', ${q})) OR

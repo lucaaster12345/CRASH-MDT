@@ -12,7 +12,6 @@ x-app: &app
   environment:
     NODE_ENV: production
     APP_ORIGIN: "https://${DOMAIN:?Set DOMAIN in .env}"
-    DISPLAY_TIMEZONE: "${DISPLAY_TIMEZONE:-UTC}"
     DATABASE_URL: "postgresql://crash:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/crash"
     TRUST_PROXY: "1"
   logging: *logging

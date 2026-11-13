@@ -15,7 +15,7 @@ import {
   version,
 } from '../../packages/shared/validation.js'
 import type { Prisma } from '../../generated/prisma/client.js'
-import { actor, lockIdentity, requireEditor } from './auth.js'
+import { actor, lockIdentity, requireAdmin, requireEditor } from './auth.js'
 import { db, audit, auditValues, publicUser, type Database, type Actor } from './db.js'
 import { check, checkVersion } from './errors.js'
 import { isCaseEditor, scopedCase, visibleCase, withCase } from './access.js'
@@ -47,10 +47,20 @@ export const documentMeta = {
   epoch: true,
   version: true,
   author: { select: publicUser },
+  authorName: true,
   createdAt: true,
   updatedAt: true,
   stateHash: true,
-  submitted: { select: { id: true, stateHash: true, createdAt: true, actor: { select: publicUser } } },
+  submitted: {
+    select: {
+      id: true,
+      stateHash: true,
+      createdAt: true,
+      chargeVersion: true,
+      actorName: true,
+      actor: { select: publicUser },
+    },
+  },
 } satisfies Prisma.DocumentSelect
 
 export const evidenceFields = {
@@ -77,6 +87,17 @@ export async function getCase(tx: Database, user: Actor, caseId: string) {
         include: {
           profile: { select: { id: true, fullName: true, archivedAt: true } },
           user: { select: publicUser },
+          charges: {
+            orderBy: { code: 'asc' },
+            select: {
+              chargeId: true,
+              code: true,
+              title: true,
+              custodyMinutes: true,
+              fineCents: true,
+              count: true,
+            },
+          },
         },
       },
       documents: {
@@ -168,6 +189,7 @@ cases.post('/', async (req, res) => {
             title: 'Main incident report',
             type: 'INCIDENT',
             author: { connect: { id: user.id } },
+            authorName: user.displayName,
             ...initialDocument(input.template ? (template?.headings ?? []) : []),
           },
         },
@@ -181,6 +203,30 @@ cases.post('/', async (req, res) => {
 })
 
 cases.get('/:id', async (req, res) => res.json(await getCase(db, actor(req), id.parse(req.params.id))))
+
+cases.delete('/:id', async (req, res) => {
+  requireAdmin(actor(req))
+  const caseId = id.parse(req.params.id)
+  const input = z.object({ version, confirmation: requiredText(40) }).parse(req.body)
+  await withCase(
+    req,
+    caseId,
+    async (tx, user, record) => {
+      requireAdmin(user)
+      checkVersion(record.version, input.version)
+      check(record.number === input.confirmation, 422, 'Enter the case number to confirm deletion.')
+      await ensureSaved(tx, caseId)
+      await tx.$executeRaw`UPDATE "Case" SET version = version + 1
+      WHERE id IN (SELECT "fromId" FROM "RelatedCase" WHERE "toId" = ${caseId})`
+      await tx.case.delete({ where: { id: caseId } })
+      await audit(tx, user.id, 'case.deleted', 'case', caseId, { number: record.number }, caseId)
+    },
+    true,
+  )
+  publish({ caseId, disconnect: true })
+  publish()
+  res.sendStatus(204)
+})
 
 cases.patch('/:id', async (req, res) => {
   const caseId = id.parse(req.params.id)
@@ -288,7 +334,8 @@ cases.post('/:id/status', async (req, res) => {
         check(
           report?.submitted &&
             meaningfulNarrative(report.submitted.narrativeText) &&
-            report.stateHash === report.submitted.stateHash,
+            report.stateHash === report.submitted.stateHash &&
+            (report.submitted.chargeVersion ?? 0) === record.chargeVersion,
           409,
           'Save and submit the current incident report before changing this status.',
         )
@@ -387,8 +434,15 @@ async function personChanged(
   personId: string,
   action: string,
   details: unknown,
+  changesCharges = false,
 ) {
-  await tx.case.update({ where: { id: caseId }, data: { version: { increment: 1 } } })
+  await tx.case.update({
+    where: { id: caseId },
+    data: {
+      version: { increment: 1 },
+      ...(changesCharges ? { chargeVersion: { increment: 1 } } : {}),
+    },
+  })
   await audit(tx, user.id, action, 'person', personId, auditValues(details), caseId)
 }
 
@@ -401,8 +455,24 @@ cases.patch('/:id/persons/:personId', async (req, res) => {
     const before = await tx.casePerson.findFirst({ where: { id: personId, caseId } })
     check(before, 404, 'Person not found.')
     await validatePerson(tx, input)
+    const changesChargeName =
+      before.role === 'SUSPECT' && (before.role !== input.role || before.name !== input.name)
+    const hasCharges = changesChargeName && (await tx.suspectCharge.count({ where: { personId } })) > 0
+    check(
+      !hasCharges || input.role === 'SUSPECT',
+      409,
+      'Remove the assigned charges before changing this suspect’s role.',
+    )
     await tx.casePerson.update({ where: { id: personId }, data: input })
-    await personChanged(tx, caseId, user, personId, 'person.updated', { before, after: input })
+    await personChanged(
+      tx,
+      caseId,
+      user,
+      personId,
+      'person.updated',
+      { before, after: input },
+      hasCharges,
+    )
   })
   publish({ caseId })
   res.sendStatus(204)
@@ -439,8 +509,17 @@ cases.delete('/:id/persons/:personId', async (req, res) => {
     checkVersion(record.version, input.version)
     const before = await tx.casePerson.findFirst({ where: { id: personId, caseId } })
     check(before, 404, 'Person not found.')
+    const charges = await tx.suspectCharge.findMany({ where: { personId } })
     await tx.casePerson.delete({ where: { id: personId } })
-    await personChanged(tx, caseId, user, personId, 'person.removed', { before })
+    await personChanged(
+      tx,
+      caseId,
+      user,
+      personId,
+      'person.removed',
+      { before, charges },
+      charges.length > 0,
+    )
   })
   publish({ caseId })
   res.sendStatus(204)
@@ -503,7 +582,14 @@ cases.get('/:id/activity', async (req, res) => {
     skip: (page - 1) * 30,
     take: 31,
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { id: true, action: true, target: true, createdAt: true, actor: { select: publicUser } },
+    select: {
+      id: true,
+      action: true,
+      target: true,
+      createdAt: true,
+      actorName: true,
+      actor: { select: publicUser },
+    },
   })
   res.json({ items: rows.slice(0, 30), more: rows.length > 30 })
 })

@@ -147,15 +147,18 @@ export function Confirm({
   run,
   danger = false,
   children,
+  confirmation,
 }: {
   label: string
   description: string
-  run: () => Promise<unknown>
+  run: (confirmation: string) => Promise<unknown>
+  confirmation?: string
   danger?: boolean
   children?: ReactNode
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const title = useId()
+  const [attempt, setAttempt] = useState(0)
   return (
     <>
       <button
@@ -169,19 +172,32 @@ export function Confirm({
       >
         {children || label}
       </button>
-      <dialog ref={dialog} aria-labelledby={title}>
+      <dialog
+        ref={dialog}
+        aria-labelledby={title}
+        aria-describedby={title + '-description'}
+        onClose={() => setAttempt((value) => value + 1)}
+      >
         <h2 id={title}>{label}</h2>
-        <p>{description}</p>
+        <p id={title + '-description'}>{description}</p>
         <ActionForm
+          key={attempt}
           label={label}
-          submit={async () => {
-            await run()
+          submit={async (form) => {
+            const value = String(form.get('confirmation') ?? '').trim()
+            if (confirmation && value !== confirmation)
+              throw new Error('The confirmation text does not match.')
+            await run(value)
             dialog.current?.close()
           }}
           onCancel={() => dialog.current?.close()}
           focusCancel
         >
-          {null}
+          {confirmation && (
+            <Field label={'Type ' + confirmation + ' to confirm'}>
+              <input name="confirmation" required autoComplete="off" spellCheck={false} />
+            </Field>
+          )}
         </ActionForm>
       </dialog>
     </>
@@ -466,7 +482,7 @@ export function Events({ entries, details = false }: { entries: Activity[]; deta
           <time dateTime={entry.createdAt}>{date(entry.createdAt)}</time>
           <div>
             <strong>{entry.action.replaceAll('.', ' · ').replaceAll('_', ' ')}</strong>
-            <span className="muted"> · {entry.actor?.displayName ?? 'System'}</span>
+            <span className="muted"> · {entry.actorName ?? entry.actor?.displayName ?? 'System'}</span>
             {details && entry.details != null && (
               <details>
                 <summary>Change details</summary>

@@ -4,7 +4,9 @@ import { api, selected } from './api.js'
 import { useDate, useResource } from './state.js'
 import { Empty, ActionForm, PageHead, ResourceView } from './ui.js'
 import type { CaseRecord, Packet } from './types.js'
-import { labels, safeHttps } from '../../../packages/shared/validation.js'
+import { labels, safeHttps, isLegalDocument } from '../../../packages/shared/validation.js'
+
+import { ChargeBreakdown } from './charges.js'
 
 function download(packet: Packet) {
   const blob = new Blob([JSON.stringify(packet, null, 2) + '\n'], { type: 'application/json' })
@@ -43,6 +45,7 @@ export function PacketPage({ caseId }: { caseId: string }) {
                         documents: selected(form, 'documents'),
                         evidence: form.has('evidence'),
                         tasks: form.has('tasks'),
+                        charges: form.has('charges'),
                       },
                     }),
                   )
@@ -59,9 +62,14 @@ export function PacketPage({ caseId }: { caseId: string }) {
                         defaultChecked={doc.type === 'INCIDENT'}
                       />
                       {doc.title}
+                      {isLegalDocument(doc.type) && ' · Draft'}
                     </label>
                   ))}
                   <h2>Other sections</h2>
+                  <label className="check">
+                    <input type="checkbox" name="charges" defaultChecked />
+                    Suspect charges and totals
+                  </label>
                   <label className="check">
                     <input type="checkbox" name="evidence" defaultChecked />
                     Evidence references
@@ -111,6 +119,7 @@ export function PacketPage({ caseId }: { caseId: string }) {
           {packet.documents.map((doc) => (
             <section key={doc.id}>
               <h2>{doc.title}</h2>
+              {doc.legalDraft && <p>Draft for review</p>}
               {doc.amended && <p>Working copy · amendments pending review</p>}
               <p className="preserve prose">{doc.plainText || 'No text recorded.'}</p>
               {doc.amended && doc.submitted && (
@@ -121,6 +130,19 @@ export function PacketPage({ caseId }: { caseId: string }) {
               )}
             </section>
           ))}
+          {!!packet.charges.length && (
+            <section>
+              <h2>Suspect charges and totals</h2>
+              <ChargeBreakdown summaries={packet.charges} />
+            </section>
+          )}
+          {packet.documents.some((doc) => doc.type === 'INCIDENT' && doc.amended) &&
+            !!packet.submittedCharges?.length && (
+              <section>
+                <h2>Charges in last submitted report</h2>
+                <ChargeBreakdown summaries={packet.submittedCharges} />
+              </section>
+            )}
           {!!packet.evidence.length && (
             <section>
               <h2>Evidence references</h2>

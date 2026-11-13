@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, query, string } from './api.js'
+import { browserTimeZone } from './local-time.js'
 import { useCatalog, useDate, useDebounce, useResource, useSession } from './state.js'
 import {
   AsyncButton,
@@ -119,12 +120,12 @@ function TaskTable({ items, empty }: { items: TaskCard[]; empty: string }) {
 
 export function Dashboard() {
   const resource = useResource<DashboardData>('/search/dashboard')
-  const { user, timezone } = useSession()
+  const { user } = useSession()
   return (
     <div className="page">
       <PageHead
         title="Dashboard"
-        detail={'Times shown in ' + timezone}
+        detail={'Times shown in ' + browserTimeZone()}
         actions={
           user.role !== 'VIEWER' && (
             <Link className="button primary" to="/cases/new">
@@ -197,7 +198,7 @@ export function Directory({ kind }: { kind: 'cases' | 'profiles' }) {
   const global = location.pathname === '/search'
   const { user } = useSession()
   const catalog = useCatalog()
-  const url = '/search/' + kind + query({ ...filters, q: settled })
+  const url = '/search/' + kind + query({ ...filters, q: settled, timeZone: browserTimeZone() })
   const result = useResource<Page<CaseCard> | Page<ProfileCard>>(composing ? null : url)
   const profiles = useResource<Page<ProfileCard>>(
     global && settled && !composing
@@ -245,7 +246,7 @@ export function Directory({ kind }: { kind: 'cases' | 'profiles' }) {
               onCompositionEnd={() => setComposing(false)}
               placeholder={
                 kind === 'cases'
-                  ? 'Case number, title, person or report text'
+                  ? 'Case number, person, charge or report text'
                   : 'Name, alias or identifier'
               }
             />
@@ -300,14 +301,14 @@ export function Directory({ kind }: { kind: 'cases' | 'profiles' }) {
                 <SelectOptions values={catalog.value?.tags ?? []} />
               </select>
             </Field>
-            <Field label="From (UTC)">
+            <Field label="From (local date)">
               <input
                 type="date"
                 value={filters.from ?? ''}
                 onChange={(e) => update('from', e.target.value)}
               />
             </Field>
-            <Field label="Through (UTC)">
+            <Field label="Through (local date)">
               <input
                 type="date"
                 value={filters.to ?? ''}

@@ -85,7 +85,13 @@ caseItems.post('/evidence', async (req, res) => {
   const item = await withCase(req, caseId, async (tx, user, record) => {
     await validateEvidence(tx, caseId, input)
     const evidence = await tx.evidence.create({
-      data: { ...input, caseId, reference: record.nextEvidence, submittedById: user.id },
+      data: {
+        ...input,
+        caseId,
+        reference: record.nextEvidence,
+        submittedById: user.id,
+        submittedByName: user.displayName,
+      },
     })
     await tx.case.update({ where: { id: caseId }, data: { nextEvidence: { increment: 1 } } })
     await changed(tx, user, caseId, 'evidence.added', 'evidence', evidence.id, { after: evidence })
@@ -170,6 +176,7 @@ caseItems.get('/evidence/:itemId/history', async (req, res) => {
       action: true,
       details: true,
       createdAt: true,
+      actorName: true,
       actor: { select: { displayName: true } },
     },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -237,6 +244,7 @@ caseItems.post('/tasks', async (req, res) => {
         caseId,
         completedAt: input.status === 'DONE' ? new Date() : null,
         completedById: input.status === 'DONE' ? user.id : null,
+        completedByName: input.status === 'DONE' ? user.displayName : null,
       },
     })
     await changed(tx, user, caseId, 'task.created', 'task', result.id, { after: result })
@@ -263,9 +271,9 @@ caseItems.patch('/tasks/:itemId', async (req, res) => {
         ...input,
         version: { increment: 1 },
         ...(completed
-          ? { completedAt: new Date(), completedById: user.id }
+          ? { completedAt: new Date(), completedById: user.id, completedByName: user.displayName }
           : reopened
-            ? { completedAt: null, completedById: null }
+            ? { completedAt: null, completedById: null, completedByName: null }
             : {}),
       },
     })

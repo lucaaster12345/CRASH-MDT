@@ -998,6 +998,28 @@ dialog p {
   outline-offset: 7px;
   overflow-wrap: anywhere;
 }
+.document-frame .tiptap {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+.document-frame + .surface {
+  margin-top: 16px;
+}
+.suspect-charges {
+  margin-top: 8px;
+}
+.suspect-charges > button {
+  margin-top: 5px;
+}
+.charge-breakdown {
+  display: grid;
+  gap: 14px;
+}
+.charge-breakdown ul {
+  margin: 5px 0;
+  padding-inline-start: 20px;
+}
 .tiptap h1,
 .tiptap h2,
 .tiptap h3 {
